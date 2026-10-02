@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using these metadata."
+type: software
+title: "AlphaFold3 and AlphaFold2 inference on Cloud TPUs"
+authors:
+  - family-names: Pazienza
+    given-names: Lorenzo
+    affiliation: "LUISS Guido Carli University"
+repository-code: "https://github.com/lorenzopazienza/alphafold-on-tpu"
+license: MIT

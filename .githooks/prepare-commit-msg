@@ -1,0 +1,6 @@
+#!/bin/sh
+# Same filter as commit-msg, applied when Git pre-fills the message.
+case "$2" in
+  message|template|merge|squash|commit) exec "$(dirname "$0")/commit-msg" "$1" ;;
+esac
+exit 0

@@ -1,0 +1,8 @@
+#!/bin/sh
+# Remove AI-tool attribution lines from the commit message file given as $1.
+# Portable on macOS and Linux: filter to a temp file, then replace the original.
+msg="$1"
+[ -f "$msg" ] || exit 0
+tmp="${msg}.filtered"
+grep -v -i -E '^(co-authored-by:.*(cursor|anysphere))|^made-with:.*cursor' "$msg" > "$tmp" || true
+mv "$tmp" "$msg"
