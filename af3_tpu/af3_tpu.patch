@@ -1,0 +1,25 @@
+diff --git a/run_alphafold.py b/run_alphafold.py
+index 33664af..02e1895 100644
+--- a/run_alphafold.py
++++ b/run_alphafold.py
+@@ -74,6 +74,7 @@ class JaxBackend(enum.StrEnum):
+   CPU = enum.auto()
+   GPU = enum.auto()
+   MPS = enum.auto()  # Apple Metal Performance Shaders (MPS).
++  TPU = enum.auto()  # Google Cloud TPU.
+ 
+ 
+ # Input and output paths.
+@@ -970,6 +971,12 @@ def main(_):
+                 ' https://developer.nvidia.com/cuda-gpus) the'
+                 ' --flash_attention_implementation must be set to "xla".'
+             )
++    elif _JAX_BACKEND.value == JaxBackend.TPU:
++      if _FLASH_ATTENTION_IMPLEMENTATION.value != 'xla':
++        raise ValueError(
++            'For TPU inference, --flash_attention_implementation must be set'
++            ' to "xla".'
++        )
+     else:
+       raise ValueError(f'Unsupported JAX backend: {_JAX_BACKEND.value}')
+ 

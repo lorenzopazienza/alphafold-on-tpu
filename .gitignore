@@ -5,3 +5,9 @@ __pycache__/
 *.local
 _internal/
 results/**/trace_*/
+
+# AlphaFold3 clone (pinned in af3_tpu/pin.sh) and model weights: never committed
+third_party/
+weights/
+*.bin
+*.bin.zst
