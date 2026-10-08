@@ -1,0 +1,42 @@
+{
+  "built_utc": "2026-10-08T14:54:29+00:00",
+  "built_by": "inputs/build_inputs.py",
+  "repo_commit": "ecde4f5ece3b2e035c17b01b62afa388ddd77520",
+  "alphafold3_commit": "85c4d20505fd5cef05eac22b534d4e793971ae69",
+  "af3_buckets": [
+    256,
+    512,
+    768,
+    1024,
+    1280,
+    1536,
+    2048,
+    2560,
+    3072,
+    3584,
+    4096,
+    4608,
+    5120
+  ],
+  "af3_ref_max_modified_date": "2021-09-30",
+  "validation": "folding_input.load_fold_inputs_from_path + featurisation.featurise_input (first seed, no inference)",
+  "seeds": [
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "python": "3.12.6",
+  "packages": {
+    "alphafold3": "3.0.4",
+    "jax": "0.10.2",
+    "jaxlib": "0.10.2",
+    "numpy": "2.4.1",
+    "rdkit": "2025.9.4",
+    "dm-haiku": "0.0.16",
+    "tokamax": "0.0.12"
+  },
+  "targets_csv_sha256": "2d4f0f63da778e3ddd970d30bb7902fb3f4a09deffce35f25ccfae99610bd08b",
+  "inputs": 60
+}

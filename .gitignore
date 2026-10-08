@@ -11,3 +11,9 @@ third_party/
 weights/
 *.bin
 *.bin.zst
+
+# Study data and run results stay out of git: raw downloads, MSAs, frozen
+# inputs (their hashes are in inputs/manifest.csv), and every session under
+# results/, smoke tests included
+data/
+results/

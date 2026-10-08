@@ -1,0 +1,102 @@
+{
+  "built_utc": "2026-10-08T13:20:48+00:00",
+  "posebusters": {
+    "zenodo_record": "https://zenodo.org/records/8278563",
+    "zenodo_title": "PoseBusters: AI-based docking methods fail to generate physically valid poses or generalise to novel sequences",
+    "zenodo_publication_date": "2023-08-24",
+    "licence": "cc-by-4.0",
+    "file": "posebusters_paper_data.zip",
+    "url": "https://zenodo.org/api/records/8278563/files/posebusters_paper_data.zip/content",
+    "md5_verified": "md5:f004ac7c4e68317b5348497d2bb6bee6",
+    "sha256": "495a8f432ee5612c0dfa3cc582829f112bfca3c29dddc2db2c3a8dc7609e721c",
+    "complexes_in_zip": 428,
+    "v2_ids_url": "https://github.com/maabuu/posebusters/files/14516485/posebusters_pdb_ccd_ids.txt",
+    "v2_ids_sha256": "a69a7b6b9a5a52531933078ef983e6c069e3a987a1d7a733bd7d72cbe1793de6",
+    "v2_ids_count": 308
+  },
+  "rcsb": {
+    "url_template": "https://files.rcsb.org/download/{pdb}.cif",
+    "licence": "PDB data: CC0 1.0 (wwPDB usage policy)",
+    "entries_downloaded": 134
+  },
+  "alphafold3": {
+    "commit": "85c4d20505fd5cef05eac22b534d4e793971ae69",
+    "buckets": [
+      256,
+      512,
+      768,
+      1024,
+      1280,
+      1536,
+      2048,
+      2560,
+      3072,
+      3584,
+      4096,
+      4608,
+      5120
+    ],
+    "ref_max_modified_date": "2021-09-30"
+  },
+  "rule": {
+    "max_tokens": 1024,
+    "bins": [
+      [
+        "le256",
+        1,
+        256
+      ],
+      [
+        "257-512",
+        257,
+        512
+      ],
+      [
+        "513-768",
+        513,
+        768
+      ],
+      [
+        "769-1024",
+        769,
+        1024
+      ]
+    ],
+    "n_targets": 60,
+    "n_pilot": 10,
+    "sample_seed": 2026,
+    "pilot_seed_start": 2027,
+    "pilot_seed_used": 2028,
+    "allocation": {
+      "769-1024": 8,
+      "513-768": 14,
+      "le256": 19,
+      "257-512": 19
+    }
+  },
+  "counts": {
+    "v2": 308,
+    "by_status": {
+      "eligible": 72,
+      "selected": 60,
+      "excluded": 176
+    },
+    "eligible_by_bin": {
+      "le256": 24,
+      "257-512": 86,
+      "513-768": 14,
+      "769-1024": 8
+    },
+    "exclusion_reasons": {
+      "3 protein chains": 9,
+      "2 protein chains": 127,
+      "6 protein chains": 4,
+      "more than 1024 tokens": 2,
+      "5 protein chains": 1,
+      "4 protein chains": 30,
+      "8 protein chains": 1,
+      "12 protein chains": 1,
+      "40 protein chains": 1
+    }
+  }
+}

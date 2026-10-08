@@ -1,0 +1,58 @@
+# Run configurations for harness/run_af3.py.
+#
+# Read by the harness's own minimal reader (no PyYAML on the VMs): nested
+# "key: value" mappings indented by two spaces, comments, no lists, no
+# anchors, no multi-line values. Values are strings.
+#
+# env: variables set for run_alphafold.py on top of the caller's environment.
+# GPU values follow AlphaFold3's docs/performance.md and docker/Dockerfile:
+# --xla_gpu_enable_triton_gemm=false works around slow compilation; compute
+# capability 7.x GPUs (T4) need --xla_disable_hlo_passes=custom-kernel-fusion-rewriter
+# and XLA attention; preallocation with a 0.95 memory fraction is the
+# Dockerfile default.
+#
+# Recycles and diffusion samples are AlphaFold3's defaults (10 and 5) unless
+# the harness is given --num_recycles or --num_diffusion_samples.
+
+# cpu_xla pins JAX to the CPU. Without it, on Apple silicon the jax-mps plugin
+# that AlphaFold3 installs becomes JAX's default backend: helper operations run
+# on the Mac's GPU and the persistent compilation cache stays disabled (tested
+# 2026-10-08 with jax 0.10.2). On Linux it changes nothing.
+cpu_xla:
+  description: CPU only, XLA attention
+  jax_backend: cpu
+  flash_attention_implementation: xla
+  env:
+    JAX_PLATFORMS: cpu
+
+l4_xla:
+  description: NVIDIA L4 (compute capability 8.9), XLA attention
+  jax_backend: gpu
+  flash_attention_implementation: xla
+  env:
+    XLA_FLAGS: --xla_gpu_enable_triton_gemm=false
+    XLA_PYTHON_CLIENT_PREALLOCATE: true
+    XLA_CLIENT_MEM_FRACTION: 0.95
+
+l4_triton:
+  description: NVIDIA L4, Triton flash attention (the AlphaFold3 GPU default)
+  jax_backend: gpu
+  flash_attention_implementation: triton
+  env:
+    XLA_FLAGS: --xla_gpu_enable_triton_gemm=false
+    XLA_PYTHON_CLIENT_PREALLOCATE: true
+    XLA_CLIENT_MEM_FRACTION: 0.95
+
+t4_xla:
+  description: NVIDIA T4 (compute capability 7.5), XLA attention, 7.x XLA flag
+  jax_backend: gpu
+  flash_attention_implementation: xla
+  env:
+    XLA_FLAGS: --xla_disable_hlo_passes=custom-kernel-fusion-rewriter
+    XLA_PYTHON_CLIENT_PREALLOCATE: true
+    XLA_CLIENT_MEM_FRACTION: 0.95
+
+tpu_xla:
+  description: Cloud TPU (v5e or v6e, single chip), XLA attention, af3_tpu.patch
+  jax_backend: tpu
+  flash_attention_implementation: xla
