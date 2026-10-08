@@ -13,6 +13,9 @@
 #   2. the EXIT trap below deletes it when this script ends, on error and on
 #      Ctrl-C.
 #
+# vm_smoke.sh runs detached on the VM and is followed with short SSH polls
+# (cloud/lib_detached.sh), so a dropped connection does not kill the run.
+#
 # Run from the repo root, in a shell where cloud/env.sh is NOT sourced:
 #   bash cloud/af3_tpu_smoke_gce.sh
 #   ZONE=us-east5-a bash cloud/af3_tpu_smoke_gce.sh        # another v6e zone
@@ -48,8 +51,9 @@ WAIT_S=$(to_seconds "$REQUEST_VALID_FOR")
 
 cd "$(git rev-parse --show-toplevel)"
 source af3_tpu/pin.sh
+source cloud/lib_detached.sh
 BENCH_COMMIT=$(git rev-parse HEAD)
-BENCH_DIRTY=$([ -z "$(git status --porcelain -- af3_tpu cloud/af3_tpu_smoke_gce.sh)" ] && echo false || echo true)
+BENCH_DIRTY=$([ -z "$(git status --porcelain -- af3_tpu cloud/af3_tpu_smoke_gce.sh cloud/lib_detached.sh)" ] && echo false || echo true)
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 SESSION="${STAMP}_$MACHINE_TYPE"
 VM_NAME="${VM_NAME:-af3-smoke-v6e-$(echo "$STAMP" | tr 'A-Z' 'a-z')}"
@@ -60,7 +64,7 @@ EXPIRES=$(( $(date +%s) + WAIT_S + RUN_S ))
 GC="--project=$PROJECT --zone=$ZONE"
 DISK_TYPE_FLAG=""
 [ -z "$BOOT_DISK_TYPE" ] || DISK_TYPE_FLAG="--boot-disk-type=$BOOT_DISK_TYPE"
-vm_ssh() { gcloud compute ssh "$VM_NAME" $GC --ssh-flag=-oServerAliveInterval=30 --command "$1"; }
+vm_ssh() { gcloud compute ssh "$VM_NAME" $GC --ssh-flag=-oServerAliveInterval=30 --ssh-flag=-oConnectTimeout=30 --command "$1"; }
 
 # Status of this VM's insert operation: PENDING, RUNNING, DONE, or empty.
 insert_op() {
@@ -96,9 +100,17 @@ cleanup() {
       echo "!!   gcloud compute instances delete $VM_NAME --project=$PROJECT --zone=$ZONE --quiet"
     fi
   fi
-  echo ">> af3-smoke VMs left in $ZONE (anything listed here is billing or queued):"
-  gcloud compute instances list --project="$PROJECT" --zones="$ZONE" \
-    --filter="name~^af3-smoke-" --format="table(name,machineType.basename(),status)"
+  # Listed project-wide and filtered here: a gcloud --filter that matches
+  # nothing prints a "filter keys were not present" warning.
+  echo ">> af3-smoke VMs left in $PROJECT (anything listed here is billing or queued):"
+  local all left
+  if all=$(gcloud compute instances list --project="$PROJECT" \
+      --format="value(name,zone.basename(),machineType.basename(),status)"); then
+    left=$(echo "$all" | awk '$1 ~ /^af3-smoke-/')
+    echo "${left:-   none}"
+  else
+    echo "!! Could not list instances; check the Cloud console."
+  fi
   echo ">> exit code $rc"
   [ "${COPIED:-0}" != "1" ] || echo ">> session: results/af3_smoke/$SESSION/session.json"
   exit "$rc"
@@ -163,10 +175,14 @@ COPIED=1
 
 # vm_smoke.sh records ACCEL and RUNTIME in session.json; here they are the
 # machine type and the image family. SPOT=0: Flex-start is not a Spot VM.
-echo ">> Running af3_tpu/vm_smoke.sh on the VM"
-vm_ssh "cd ~/alphafold-on-tpu && \
-  ACCEL=$MACHINE_TYPE RUNTIME=$IMAGE_FAMILY ZONE=$ZONE PROJECT=$PROJECT TPU_NAME=$VM_NAME SPOT=0 \
-  BENCH_COMMIT=$BENCH_COMMIT BENCH_DIRTY=$BENCH_DIRTY \
-  bash af3_tpu/vm_smoke.sh ~/af3_smoke/$SESSION"
+echo ">> Starting af3_tpu/vm_smoke.sh detached on the VM"
+detached_start "af3_smoke/$SESSION" \
+  "ACCEL=$MACHINE_TYPE RUNTIME=$IMAGE_FAMILY ZONE=$ZONE PROJECT=$PROJECT TPU_NAME=$VM_NAME SPOT=0 BENCH_COMMIT=$BENCH_COMMIT BENCH_DIRTY=$BENCH_DIRTY" \
+  || die "Could not start vm_smoke.sh on the VM."
+detached_wait "af3_smoke/$SESSION" || die "No result from vm_smoke.sh."
+if [ "$DETACHED_RC" != "0" ]; then
+  echo "!! vm_smoke.sh failed with exit code $DETACHED_RC; its logs are copied below"
+  exit "$DETACHED_RC"
+fi
 echo ">> Smoke test passed"
 SMOKE_DONE=1

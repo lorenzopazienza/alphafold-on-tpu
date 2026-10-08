@@ -5,6 +5,9 @@
 # to results/af3_smoke/<timestamp>_<accel>/ and deletes the VM, also on error
 # or Ctrl-C. Not a measurement.
 #
+# vm_smoke.sh runs detached on the VM and is followed with short SSH polls
+# (cloud/lib_detached.sh), so a dropped connection does not kill the run.
+#
 # Run from the repo root, in a shell where cloud/env.sh is NOT sourced:
 #   bash cloud/af3_tpu_smoke.sh                                    # v5e
 #   ACCEL=v6e-1 RUNTIME=v2-alpha-tpuv6e ZONE=europe-west4-a \
@@ -30,13 +33,15 @@ command -v gcloud >/dev/null || die "gcloud not found."
 
 cd "$(git rev-parse --show-toplevel)"
 source af3_tpu/pin.sh
+source cloud/lib_detached.sh
 BENCH_COMMIT=$(git rev-parse HEAD)
-BENCH_DIRTY=$([ -z "$(git status --porcelain -- af3_tpu cloud/af3_tpu_smoke.sh)" ] && echo false || echo true)
+BENCH_DIRTY=$([ -z "$(git status --porcelain -- af3_tpu cloud/af3_tpu_smoke.sh cloud/lib_detached.sh)" ] && echo false || echo true)
 SESSION="$(date -u +%Y%m%dT%H%M%SZ)_$ACCEL"
 EXPIRES=$(( $(date +%s) + MAX_HOURS * 3600 ))
 
 GC=(--project="$PROJECT" --zone="$ZONE")
-SSH=(gcloud compute tpus tpu-vm ssh "$TPU_NAME" "${GC[@]}" --ssh-flag=-oServerAliveInterval=30 --command)
+SSH=(gcloud compute tpus tpu-vm ssh "$TPU_NAME" "${GC[@]}" --ssh-flag=-oServerAliveInterval=30 --ssh-flag=-oConnectTimeout=30 --command)
+vm_ssh() { "${SSH[@]}" "$1"; }
 
 # Never adopt (and later delete) a VM this run did not create.
 if gcloud compute tpus tpu-vm describe "$TPU_NAME" "${GC[@]}" >/dev/null 2>&1; then
@@ -88,10 +93,14 @@ gcloud compute tpus tpu-vm scp "$TGZ" "$TPU_NAME:af3_tpu.tgz" "${GC[@]}"
 rm -f "$TGZ"
 "${SSH[@]}" "mkdir -p ~/alphafold-on-tpu ~/af3_smoke && tar xzf ~/af3_tpu.tgz -C ~/alphafold-on-tpu"
 
-echo ">> Running af3_tpu/vm_smoke.sh on the VM"
-"${SSH[@]}" "cd ~/alphafold-on-tpu && \
-  ACCEL=$ACCEL RUNTIME=$RUNTIME ZONE=$ZONE PROJECT=$PROJECT TPU_NAME=$TPU_NAME SPOT=$SPOT \
-  BENCH_COMMIT=$BENCH_COMMIT BENCH_DIRTY=$BENCH_DIRTY \
-  bash af3_tpu/vm_smoke.sh ~/af3_smoke/$SESSION"
+echo ">> Starting af3_tpu/vm_smoke.sh detached on the VM"
+detached_start "af3_smoke/$SESSION" \
+  "ACCEL=$ACCEL RUNTIME=$RUNTIME ZONE=$ZONE PROJECT=$PROJECT TPU_NAME=$TPU_NAME SPOT=$SPOT BENCH_COMMIT=$BENCH_COMMIT BENCH_DIRTY=$BENCH_DIRTY" \
+  || die "Could not start vm_smoke.sh on the VM."
+detached_wait "af3_smoke/$SESSION" || die "No result from vm_smoke.sh."
+if [ "$DETACHED_RC" != "0" ]; then
+  echo "!! vm_smoke.sh failed with exit code $DETACHED_RC; its logs are copied below"
+  exit "$DETACHED_RC"
+fi
 echo ">> Smoke test passed"
 SMOKE_DONE=1
