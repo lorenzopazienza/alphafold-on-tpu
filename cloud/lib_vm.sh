@@ -1,8 +1,10 @@
-# Shared VM lifecycle for cloud/af3_run.sh: create, wait, SSH, copy, delete
-# and the leftover check, for Compute Engine VMs (VM_API=gce: CPU, L4, v6e)
-# and legacy Cloud TPU VMs (VM_API=tpu: v5e). Sourced after setting VM_API,
-# VM_NAME, PROJECT and ZONE, then calling vm_init. Defines vm_ssh, which
-# cloud/lib_detached.sh needs. macOS bash 3.2: no arrays; flag strings hold
+# Shared VM lifecycle for cloud/af3_run.sh and cloud/v5e_bisect.sh: create,
+# wait, SSH, copy, state, delete and the leftover check, for Compute Engine
+# VMs (VM_API=gce: CPU, L4, v6e) and legacy Cloud TPU VMs (VM_API=tpu: v5e),
+# plus the results-bucket fetch. Sourced after setting VM_API, VM_NAME,
+# PROJECT and ZONE, then calling vm_init. Defines vm_ssh, which
+# cloud/lib_detached.sh needs, and vm_state, which it uses to tell a dropped
+# connection from a preempted VM. macOS bash 3.2: no arrays; flag strings hold
 # no values with spaces (the one that does, --min-cpu-platform, is quoted
 # separately).
 
@@ -105,6 +107,103 @@ vm_arm_watchdog() {
   sudo systemd-run --unit=af3-watchdog --on-active=${1}h \
     \"\$G\" compute tpus tpu-vm delete $VM_NAME --project=$PROJECT --zone=$ZONE --quiet
   systemctl list-timers af3-watchdog* --no-pager"
+}
+
+# vm_state: the VM's state from the API (legacy TPU: state, Compute Engine:
+# status), NOT_FOUND if the API says it does not exist, UNKNOWN if the API
+# could not be asked (for example the laptop is offline).
+vm_state() {
+  local field out
+  if [ "$VM_API" = "tpu" ]; then field=state; else field=status; fi
+  if out=$(gcloud $VM_RES describe "$VM_NAME" $GC --format="value($field)" 2>&1); then
+    out=$(echo "$out" | tail -1)
+    echo "${out:-UNKNOWN}"
+  else
+    case "$out" in
+      *NOT_FOUND* | *"not found"* | *"was not found"*) echo NOT_FOUND ;;
+      *) echo UNKNOWN ;;
+    esac
+  fi
+}
+
+# vm_state_is_gone STATE: true for a state in which the job on the VM cannot
+# be running (preempted, stopped, being deleted or deleted).
+vm_state_is_gone() {
+  case "$1" in
+    PREEMPTED | TERMINATED | STOPPING | STOPPED | SUSPENDING | SUSPENDED | DELETING | NOT_FOUND) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# FETCH=light leaves AlphaFold3's two large per-target files in the results
+# bucket: *_data.json (the model input, about 22 MB at 1023 tokens) and the
+# full *_confidences.json (about 9 MB, also one per sample folder). Records,
+# logs, *_summary_confidences.json, *_ranking_scores.csv and the mmCIFs come
+# to the laptop. The same rule in two forms: find(1) on the VM, a Python
+# regular expression for gcloud storage rsync --exclude (no commas: gcloud
+# splits that flag's value on them).
+LIGHT_EXCLUDE_REGEX='.*_data\.json$|.*(?<!_summary)_confidences\.json$'
+
+# vm_fetch_light REMOTE_DIR LOCAL_PARENT: like vm_fetch, without the large
+# files (see LIGHT_EXCLUDE_REGEX), as one tar archive. Only if the VM's final
+# upload completed (REMOTE_DIR/.uploaded, written by cloud/vm_af3_job.sh);
+# otherwise the large files exist only on the VM, and everything is fetched.
+vm_fetch_light() {
+  local rdir rname tgz rc
+  rdir=$(dirname "$1") rname=$(basename "$1")
+  vm_ssh "cd \$HOME/$rdir || exit 1
+if [ -f $rname/.uploaded ]; then
+  find $rname -type f ! -name '*_data.json' \
+! \\( -name '*_confidences.json' ! -name '*_summary_confidences.json' \\) > \$HOME/.af3_fetch_light.list
+else
+  echo '!! The final upload to the results bucket did not complete: fetching everything' >&2
+  find $rname -type f > \$HOME/.af3_fetch_light.list
+fi
+tar czf \$HOME/af3_fetch_light.tgz -T \$HOME/.af3_fetch_light.list" || return 1
+  tgz=$(mktemp -t af3-fetch.XXXXXX) || return 1
+  if ! gcloud $VM_SSH_GROUP scp "$VM_NAME:af3_fetch_light.tgz" "$tgz" $GC; then
+    rm -f "$tgz"; return 1
+  fi
+  tar xzf "$tgz" -C "$2"; rc=$?
+  rm -f "$tgz"
+  return $rc
+}
+
+# bucket_fetch URI LOCAL_DIR light|full: copies a session folder from the
+# results bucket to LOCAL_DIR; light leaves the large files in the bucket.
+bucket_fetch() {
+  mkdir -p "$2" || return 1
+  if [ "$3" = "light" ]; then
+    gcloud storage rsync --recursive --exclude="$LIGHT_EXCLUDE_REGEX" "$1" "$2"
+  else
+    gcloud storage rsync --recursive "$1" "$2"
+  fi
+}
+
+# results_fetch REMOTE_DIR LOCAL_PARENT light|full [BUCKET_URI]: the
+# end-of-run fetch. Over SSH, unless lib_detached.sh found the VM gone
+# (DETACHED_VM_GONE=1); from BUCKET_URI (the session folder in the results
+# bucket) if that fails or was skipped. Returns 0 if one of them worked.
+results_fetch() {
+  local name
+  name=$(basename "$1")
+  mkdir -p "$2"
+  if [ "${DETACHED_VM_GONE:-0}" = "1" ]; then
+    echo ">> $VM_NAME is gone: no SSH fetch"
+  else
+    echo ">> Fetching $2/$name/ over SSH ($3)"
+    if [ "$3" = "light" ]; then
+      vm_fetch_light "$1" "$2" && return 0
+    else
+      vm_fetch "$1" "$2" && return 0
+    fi
+    echo "!! SSH fetch failed"
+  fi
+  [ -n "${4:-}" ] || return 1
+  echo ">> Fetching $2/$name/ from the results bucket ($3)"
+  bucket_fetch "$4" "$2/$name" "$3" && return 0
+  echo "!! Fetch from the results bucket failed too; what was uploaded stays in $4/"
+  return 1
 }
 
 # Lists every af3-run VM still in the project (Compute Engine, all zones) or

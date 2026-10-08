@@ -12,14 +12,43 @@
 #
 # PLATFORM  API              default                       provisioning
 # cpu       Compute Engine   n2-highmem-16 (Ice Lake)      Spot (SPOT=0: on-demand)
-# l4        Compute Engine   g2-standard-8 (1 x L4)        Spot (SPOT=0: on-demand)
+# l4        Compute Engine   g2-standard-8 (1 x L4)        Spot (SPOT=0: on-demand,
+#                                                          PROVISIONING=flex_start: Flex-start)
 # v5e       legacy TPU API   v5litepod-1                   Spot (SPOT=0: on-demand)
 # v6e       Compute Engine   ct6e-standard-1t              Flex-start
 #
-# Overrides: PROJECT ZONE MACHINE_TYPE SPOT IMAGE_PROJECT IMAGE_FAMILY RUNTIME
-# (v5e) BOOT_DISK_SIZE MIN_CPU_PLATFORM (cpu) REQUEST_VALID_FOR (v6e)
-# DETACHED_DEADLINE_MIN MAX_RUN_DURATION WEIGHTS (random or gcs; default: the
-# plan's) WEIGHTS_GCS_URI (gcs only; never printed) VM_NAME YES=1 (no prompt).
+# Overrides: PROJECT ZONE MACHINE_TYPE SPOT PROVISIONING (spot, standard, or
+# flex_start for l4 and v6e; wins over SPOT) IMAGE_PROJECT IMAGE_FAMILY RUNTIME
+# (v5e) BOOT_DISK_SIZE MIN_CPU_PLATFORM (cpu) REQUEST_VALID_FOR (Flex-start
+# queue, 90s to 2h, default 2h) DETACHED_DEADLINE_MIN MAX_RUN_DURATION WEIGHTS
+# (random or gcs; default: the plan's) WEIGHTS_GCS_URI (gcs only; never
+# printed) VM_NAME YES=1 (no prompt).
+#
+# Flex-start (v6e, and l4 with PROVISIONING=flex_start): the create request
+# queues up to REQUEST_VALID_FOR and is not billed while queued; the VM gets
+# --max-run-duration and --instance-termination-action=DELETE like every
+# Compute Engine VM here. Flags as documented in `gcloud compute instances
+# create --help` and https://cloud.google.com/compute/docs/instances/create-flex-start-vm
+#
+# Results bucket (optional): RESULTS_GCS_URI=gs://BUCKET[/PREFIX], a private
+# bucket separate from the weights bucket. The VM uploads each target's
+# folder as soon as it finishes, so a preempted or unreachable VM loses at
+# most the target in progress; objects go to RESULTS_GCS_URI/af3/<session>/.
+# If the final SSH fetch fails, the laptop fetches from the bucket instead.
+# FETCH=light (default) brings records, logs, *_summary_confidences.json,
+# *_ranking_scores.csv and the mmCIFs to the laptop and leaves *_data.json
+# and the full *_confidences.json in the bucket; FETCH=full brings
+# everything. Without RESULTS_GCS_URI, or if the VM's final upload failed,
+# the fetch is full, since the VM and its copy are deleted afterwards.
+#
+# Preemption: when an SSH poll fails, the launcher asks the API for the VM's
+# state; a preempted, stopped or deleted VM ends the run at once and goes
+# straight to cleanup (bucket fetch if configured, delete, leftover check).
+#
+# Price: the worst case uses cloud/prices.csv for the zone's region; if the
+# region (or machine type) has no row there, it says which list price it shows
+# instead. Without a published price for the provisioning model (G2
+# Flex-start), it uses the on-demand price as the upper bound and says so.
 #
 # The VM is deleted in every case: by the EXIT trap (results first), and
 # independently by Google: --max-run-duration with
@@ -82,15 +111,26 @@ case "$PLATFORM" in
     ZONE="${ZONE:-europe-west4-a}"
     IMAGE_PROJECT="${IMAGE_PROJECT:-ubuntu-os-accelerator-images}"
     IMAGE_FAMILY="${IMAGE_FAMILY:-ubuntu-accel-2204-amd64-tpu-v5e-v5p-v6e}"
-    REQUEST_VALID_FOR="${REQUEST_VALID_FOR:-2h}"
     [ "$MACHINE_TYPE" = "ct6e-standard-1t" ] || die "PLATFORM=v6e takes ct6e-standard-1t only (single chip), not $MACHINE_TYPE." ;;
   *) die "PLATFORM must be cpu, l4, v5e or v6e." ;;
 esac
 MIN_CPU_PLATFORM="${MIN_CPU_PLATFORM-$MIN_CPU_PLATFORM_DEFAULT}"
-case "$PLATFORM" in
-  v6e) PROVISIONING=flex_start ;;
-  *) if [ "$SPOT" = "1" ]; then PROVISIONING=spot; else PROVISIONING=standard; fi ;;
+case "${PROVISIONING:-}" in
+  "")
+    case "$PLATFORM" in
+      v6e) PROVISIONING=flex_start ;;
+      *) if [ "$SPOT" = "1" ]; then PROVISIONING=spot; else PROVISIONING=standard; fi ;;
+    esac ;;
+  flex_start)
+    case "$PLATFORM" in
+      l4 | v6e) ;;
+      *) die "PROVISIONING=flex_start is supported here for PLATFORM=l4 and v6e only." ;;
+    esac ;;
+  spot | standard)
+    [ "$PLATFORM" != "v6e" ] || die "PLATFORM=v6e runs with Flex-start only (PROVISIONING=flex_start)." ;;
+  *) die "PROVISIONING must be spot, standard or flex_start." ;;
 esac
+REGION="${ZONE%-*}"
 
 # "1d2h3m4s" -> seconds.
 to_seconds() {
@@ -121,6 +161,23 @@ case "$WEIGHTS" in
 esac
 [ "$WEIGHTS" = "$PLAN_WEIGHTS" ] || echo "   note: the plan asks for weights=$PLAN_WEIGHTS; running with WEIGHTS=$WEIGHTS"
 
+# Results bucket and fetch mode.
+RESULTS_GCS_URI="${RESULTS_GCS_URI:-}"
+FETCH="${FETCH:-light}"
+case "$FETCH" in light | full) ;; *) die "FETCH must be light or full." ;; esac
+if [ -n "$RESULTS_GCS_URI" ]; then
+  RESULTS_GCS_URI="${RESULTS_GCS_URI%/}"
+  echo "$RESULTS_GCS_URI" | grep -Eq '^gs://[a-z0-9][a-z0-9._-]*[a-z0-9](/[A-Za-z0-9._-]+)*$' \
+    || die "RESULTS_GCS_URI must be gs://BUCKET or gs://BUCKET/PREFIX (letters, digits, . _ - /)."
+  RESULTS_BUCKET=$(echo "$RESULTS_GCS_URI" | cut -d/ -f3)
+  if [ "$WEIGHTS" = "gcs" ] && [ "$RESULTS_BUCKET" = "$(echo "$WEIGHTS_GCS_URI" | cut -d/ -f3)" ]; then
+    die "RESULTS_GCS_URI must be a different bucket from the weights bucket."
+  fi
+  FETCH_EFFECTIVE=$FETCH
+else
+  FETCH_EFFECTIVE=full
+fi
+
 DETACHED_DEADLINE_MIN="${DEADLINE_OVERRIDE:-$PLAN_DEADLINE}"
 [ "$DETACHED_DEADLINE_MIN" -gt 0 ] 2> /dev/null \
   || die "The plan's deadline for $PLATFORM is not set (0). Size it from the probe, or set DETACHED_DEADLINE_MIN."
@@ -129,7 +186,16 @@ MAX_RUN_S=$(to_seconds "$MAX_RUN_DURATION")
 [ "$MAX_RUN_S" -ge $(( DETACHED_DEADLINE_MIN * 60 + 600 )) ] \
   || die "MAX_RUN_DURATION ($MAX_RUN_DURATION) must exceed the deadline ($DETACHED_DEADLINE_MIN min) by 10 min or more."
 WATCHDOG_HOURS=$(( (MAX_RUN_S + 3599) / 3600 ))
-if [ "$PLATFORM" = "v6e" ]; then WAIT_S=$(( $(to_seconds "$REQUEST_VALID_FOR") + 600 )); else WAIT_S=900; fi
+if [ "$PROVISIONING" = "flex_start" ]; then
+  # Google accepts 90 s to 2 h for a zonal Flex-start request.
+  REQUEST_VALID_FOR="${REQUEST_VALID_FOR:-2h}"
+  REQUEST_VALID_S=$(to_seconds "$REQUEST_VALID_FOR")
+  [ "$REQUEST_VALID_S" -ge 90 ] && [ "$REQUEST_VALID_S" -le 7200 ] \
+    || die "REQUEST_VALID_FOR ($REQUEST_VALID_FOR) must be between 90s and 2h for a Flex-start request in one zone."
+  WAIT_S=$(( REQUEST_VALID_S + 600 ))
+else
+  WAIT_S=900
+fi
 
 # Frozen inputs must match the manifest before anything is created.
 echo ">> Checking the plan's frozen inputs against inputs/manifest.csv"
@@ -143,17 +209,53 @@ VM_NAME="${VM_NAME:-af3-run-$PLATFORM-$(echo "$STAMP" | tr 'A-Z' 'a-z')}"
 OUT_REL="alphafold-on-tpu/results/af3/$SESSION"
 BENCH_COMMIT=$(git rev-parse HEAD)
 EXPIRES=$(( $(date +%s) + MAX_RUN_S + WAIT_S ))
+RESULTS_SESSION_URI="${RESULTS_GCS_URI:+$RESULTS_GCS_URI/af3/$SESSION}"
 vm_init
 
-# What will run and what it can cost, before anything is created.
-PRICE_LINE=$(python3 - "$PLATFORM" "$PROVISIONING" <<'EOF'
+# What will run and what it can cost, before anything is created. The price
+# is the row for this platform, provisioning, machine type and the zone's
+# region; any fallback is printed (PRICE_NOTES).
+PRICE_OUT=$(python3 - "$PLATFORM" "$PROVISIONING" "$MACHINE_TYPE" "$REGION" <<'EOF'
 import csv, sys
-for r in csv.DictReader(open('cloud/prices.csv')):
-  if r['platform'] == sys.argv[1] and r['provisioning'] == sys.argv[2]:
-    print(f"{r['usd_per_hour']} {r['read_on']} {r['source_url']}")
-    break
+platform, prov, machine, region = sys.argv[1:5]
+rows = [r for r in csv.DictReader(open('cloud/prices.csv')) if r['platform'] == platform]
+
+def pick(provisioning):
+  cands = [r for r in rows if r['provisioning'] == provisioning]
+  for ok in (lambda r: r['machine_type'] == machine and r['region'] == region,
+             lambda r: r['region'] == region,
+             lambda r: r['machine_type'] == machine and r['region'] == 'europe-west4',
+             lambda r: r['region'] == 'europe-west4',
+             lambda r: True):
+    for r in cands:
+      if ok(r):
+        return r
+  return None
+
+notes = []
+row = pick(prov)
+if row is None:
+  sys.exit(0)
+if not row['usd_per_hour'].strip():
+  std = pick('standard')
+  if std is None or not std['usd_per_hour'].strip():
+    sys.exit(0)
+  notes.append(f"no published {prov} price for {row['machine_type']} in {row['region']} "
+               f"({row['source_url']}, read {row['read_on']}); the worst case uses the "
+               f"on-demand price as an upper bound")
+  row = std
+if row['region'] != region:
+  notes.append(f"no {platform} {prov} price for region {region} in cloud/prices.csv: "
+               f"the price shown is the {row['region']} list price, not {region}'s")
+if row['machine_type'] != machine:
+  notes.append(f"no price for {machine} in cloud/prices.csv: the price shown is for {row['machine_type']}")
+print(row['usd_per_hour'], row['read_on'], row['source_url'])
+for n in notes:
+  print(n)
 EOF
 )
+PRICE_LINE=$(echo "$PRICE_OUT" | head -1)
+PRICE_NOTES=$(echo "$PRICE_OUT" | tail -n +2)
 [ -n "$PRICE_LINE" ] || die "No $PLATFORM $PROVISIONING price in cloud/prices.csv."
 set -- $PRICE_LINE
 PRICE=$1 PRICE_DATE=$2 PRICE_URL=$3
@@ -177,10 +279,16 @@ if [ "$VM_API" = "tpu" ]; then
   echo "   VM lifetime limit: watchdog deletes it after $WATCHDOG_HOURS h"
 else
   echo "   VM lifetime limit: --max-run-duration=$MAX_RUN_DURATION, then Google deletes it"
-  [ "$PLATFORM" != "v6e" ] || echo "   Flex-start queue: up to $REQUEST_VALID_FOR (not billed while queued)"
+  [ "$PROVISIONING" != "flex_start" ] || echo "   Flex-start queue: up to $REQUEST_VALID_FOR (not billed while queued)"
 fi
 echo "   worst-case cost: \$$WORST = \$$PRICE/h x $LIFETIME_H h, list price read $PRICE_DATE"
 echo "     ($PRICE_URL; excludes boot disk and network, a few cents)"
+if [ -n "$PRICE_NOTES" ]; then echo "$PRICE_NOTES" | sed 's/^/   !! price note: /'; fi
+if [ -n "$RESULTS_GCS_URI" ]; then
+  echo "   results bucket: $RESULTS_SESSION_URI/ (each target uploaded when it finishes); fetch: $FETCH_EFFECTIVE"
+else
+  echo "   results bucket: none (RESULTS_GCS_URI not set); fetch: full over SSH (FETCH=light needs the bucket)"
+fi
 echo "   session: results/af3/$SESSION/   VM: $VM_NAME"
 if [ "${YES:-0}" != "1" ]; then
   printf 'Proceed? [y/N] '
@@ -199,9 +307,7 @@ cleanup() {
   set +e
   if [ "$CREATE_ISSUED" = "1" ]; then
     if [ "$STARTED" = "1" ]; then
-      echo ">> Fetching results/af3/$SESSION/"
-      mkdir -p results/af3
-      vm_fetch "$OUT_REL" results/af3/
+      results_fetch "$OUT_REL" results/af3 "$FETCH_EFFECTIVE" "$RESULTS_SESSION_URI"
     fi
     echo ">> Deleting $VM_NAME"
     if ! vm_delete && [ "$VM_API" = "gce" ]; then
@@ -239,7 +345,7 @@ else
 --provisioning-model=$(echo "$PROVISIONING" | tr 'a-z' 'A-Z') --max-run-duration=$MAX_RUN_DURATION \
 --instance-termination-action=DELETE --maintenance-policy=TERMINATE --reservation-affinity=none \
 --scopes=cloud-platform --labels=$LABELS"
-  [ "$PLATFORM" != "v6e" ] || FLAGS="$FLAGS --request-valid-for-duration=$REQUEST_VALID_FOR"
+  [ "$PROVISIONING" != "flex_start" ] || FLAGS="$FLAGS --request-valid-for-duration=$REQUEST_VALID_FOR"
   vm_create_gce "$FLAGS"
   vm_wait_running "$WAIT_S" || exit 1
 fi
@@ -268,9 +374,12 @@ DETACHED_SCRIPT=cloud/vm_af3_job.sh
 DETACHED_LOG=job.log
 STARTED=1
 detached_start "$OUT_REL" \
-  "PLATFORM=$PLATFORM PLAN=$PLAN WEIGHTS=$WEIGHTS TARGETS=$TARGETS SESSION=$SESSION" \
+  "PLATFORM=$PLATFORM PLAN=$PLAN WEIGHTS=$WEIGHTS TARGETS=$TARGETS SESSION=$SESSION RESULTS_URI=$RESULTS_SESSION_URI" \
   || die "Could not start the job on the VM."
-detached_wait "$OUT_REL" || die "No result from the job."
+if ! detached_wait "$OUT_REL"; then
+  [ "$DETACHED_VM_GONE" != "1" ] || die "$VM_NAME was preempted or deleted during the run; cleaning up."
+  die "No result from the job."
+fi
 if [ "$DETACHED_RC" != "0" ]; then
   echo "!! The job exited with $DETACHED_RC (setup: 3 inputs, 4 weights, 5 device;" \
        "plan: 1 some runs failed, all recorded); results are fetched below"

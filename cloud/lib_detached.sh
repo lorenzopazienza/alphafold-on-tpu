@@ -12,6 +12,12 @@
 #   DETACHED_SCRIPT         script started on the VM, relative to ~/alphafold-on-tpu
 #                           (af3_tpu/vm_smoke.sh)
 #   DETACHED_LOG            log in ~/OUT whose last line each poll prints (vm_smoke.log)
+#
+# Preemption: if the caller also defines vm_state and vm_state_is_gone
+# (cloud/lib_vm.sh does), every failed poll asks the API for the VM's state.
+# A preempted, stopped, deleting or missing VM ends detached_wait at once
+# (return 1, DETACHED_VM_GONE=1) instead of polling on until the SSH-failure
+# limit. Without those functions the behaviour is unchanged.
 # Written for macOS bash 3.2: no arrays, no associative arrays.
 
 DETACHED_POLL_S="${DETACHED_POLL_S:-60}"
@@ -20,6 +26,22 @@ DETACHED_DEADLINE_MIN="${DETACHED_DEADLINE_MIN:-60}"
 DETACHED_SCRIPT="${DETACHED_SCRIPT:-af3_tpu/vm_smoke.sh}"
 DETACHED_LOG="${DETACHED_LOG:-vm_smoke.log}"
 DETACHED_RC=""
+DETACHED_VM_GONE=0
+
+# detached_vm_gone: after a failed poll, true if the API says the VM is gone
+# (needs vm_state and vm_state_is_gone; false when they are not defined).
+detached_vm_gone() {
+  local vstate
+  type vm_state > /dev/null 2>&1 && type vm_state_is_gone > /dev/null 2>&1 || return 1
+  vstate=$(vm_state)
+  if vm_state_is_gone "$vstate"; then
+    echo "!! The VM is $vstate (preempted, stopped or deleted): the run cannot go on; stopping now"
+    DETACHED_VM_GONE=1
+    return 0
+  fi
+  echo "   VM state from the API: $vstate"
+  return 1
+}
 
 # detached_start OUT "VAR=value ...": start `VAR=value ... bash
 # af3_tpu/vm_smoke.sh ~/OUT` in its own session on the VM, from
@@ -83,11 +105,13 @@ tail -n 1 \$O/$DETACHED_LOG 2>/dev/null | cut -c1-160"
           return 1 ;;
         *)
           fails=$((fails + 1))
-          echo "   $(date -u +%H:%M:%SZ) unreadable poll reply ($fails/$DETACHED_MAX_SSH_FAILS)" ;;
+          echo "   $(date -u +%H:%M:%SZ) unreadable poll reply ($fails/$DETACHED_MAX_SSH_FAILS)"
+          if detached_vm_gone; then return 1; fi ;;
       esac
     else
       fails=$((fails + 1))
       echo "   $(date -u +%H:%M:%SZ) SSH poll failed ($fails/$DETACHED_MAX_SSH_FAILS in a row); the run continues on the VM"
+      if detached_vm_gone; then return 1; fi
     fi
     if [ "$fails" -ge "$DETACHED_MAX_SSH_FAILS" ]; then
       echo "!! Lost SSH to the VM: $fails polls in a row failed"

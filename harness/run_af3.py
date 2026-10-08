@@ -19,7 +19,10 @@ Compile cache (--compile_cache):
   fresh       a new, empty JAX persistent compilation cache directory for every
               process, deleted after its size is recorded (default);
   warm:NAME   the named directory data/jax_cache/NAME, reused across processes
-              and sessions; entries before and after each run are recorded.
+              and sessions; entries before and after each run are recorded;
+  none        no --jax_compilation_cache_dir at all, so JAX's persistent cache
+              stays off, as in a plain run_alphafold.py call (diagnostics:
+              cloud/vm_v5e_bisect.py).
 
 Output: results/af3/<session>/ with session.json (configuration, machine,
 packages, device, weights and manifest hashes), runs.jsonl (one line per
@@ -28,8 +31,11 @@ af3_output/. An existing session is never overwritten; results/ is gitignored.
 
 Optional records (flags):
   --entry             run run_alphafold.py's main through harness/af3_entry.py,
-                      which writes peak device memory (GPU, TPU) and the
-                      process's max RSS to af3_entry_stats.json at exit;
+                      which writes device memory (GPU, TPU: the allocator's
+                      memory_stats() and the compiled model's XLA memory
+                      analysis) and the process's max RSS to
+                      af3_entry_stats.json at exit; run.json's "memory" sums
+                      them up (see af3_entry.py for what each number means);
   --log_compiles      set JAX_LOG_COMPILES=1 and record XLA compile seconds
                       for the model (jit(apply_fn)) and in total, and whether
                       the persistent cache was hit; AlphaFold3's own log does
@@ -37,7 +43,13 @@ Optional records (flags):
   --save_fresh_cache NAME
                       with --compile_cache fresh, merge each process's new
                       cache into data/jax_cache/NAME before deleting it, so a
-                      later warm:NAME rerun reuses exactly those executables.
+                      later warm:NAME rerun reuses exactly those executables;
+  --upload_uri gs://...
+                      after each target, copy this session's folder to that
+                      folder of the results bucket (gcloud storage rsync,
+                      derived inputs excluded), so a lost VM loses at most
+                      the target in progress. An upload failure is printed and
+                      never stops the run. The URI is not written to records.
 A failed run is recorded with failure = oom, timeout, signal N or error, and
 the harness goes on with the next target.
 
@@ -229,6 +241,53 @@ def classify_failure(rc, timed_out, text):
   return 'error'
 
 
+# Derived inputs (a frozen input cut to the chosen seeds, MSAs included) are
+# large and reproducible from their SHA-256 in run.json: never uploaded.
+UPLOAD_EXCLUDE = r'.*/work/input_seeds\.json$'
+
+
+def upload(local, uri, timeout_s=900):
+  """Copies a folder to the results bucket (gcloud storage rsync); never raises.
+
+  Returns True on success. A failure is printed, and the run goes on.
+  """
+  cmd = ['gcloud', 'storage', 'rsync', '--recursive', f'--exclude={UPLOAD_EXCLUDE}', str(local), uri]
+  try:
+    out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_s)
+    ok, why = out.returncode == 0, (out.stderr or out.stdout).strip()[-300:]
+  except (OSError, subprocess.TimeoutExpired) as e:
+    ok, why = False, f'{type(e).__name__}: {e}'[:300]
+  print(f'    upload to the results bucket: {"ok" if ok else "FAILED (the run goes on): " + why}',
+        flush=True)
+  return ok
+
+
+def memory_summary(stats):
+  """The device-memory numbers of af3_entry_stats.json in one flat dict, or None.
+
+  peak_bytes_in_use / peak_bytes_reserved come from the allocator
+  (memory_stats()); compiled_* from XLA's analysis of the compiled model
+  executable (jit_apply_fn), the last one if it was compiled more than once.
+  """
+  if not stats:
+    return None
+  dev = stats.get('device_memory_stats') or {}
+  compiled = [c for c in (stats.get('compiled_memory') or []) if 'error' not in c]
+  last = compiled[-1] if compiled else {}
+  return {
+      'peak_bytes_in_use': dev.get('peak_bytes_in_use'),
+      'peak_bytes_reserved': dev.get('peak_bytes_reserved'),
+      'bytes_limit': dev.get('bytes_limit'),
+      'compiled_peak_memory_in_bytes': last.get('peak_memory_in_bytes'),
+      'compiled_temp_size_in_bytes': last.get('temp_size_in_bytes'),
+      'compiled_argument_size_in_bytes': last.get('argument_size_in_bytes'),
+      'compiled_output_size_in_bytes': last.get('output_size_in_bytes'),
+      'compiled_device_bytes_needed': last.get('device_bytes_needed'),
+      'compiled_memory_error': stats.get('compiled_memory_error'),
+      'max_rss_bytes': stats.get('max_rss_bytes'),
+  }
+
+
 def parse_log(text):
   out = {}
   for key, pat in LOG_PATTERNS.items():
@@ -250,7 +309,7 @@ def main():
   ap.add_argument('--af3_dir', default='third_party/alphafold3', help='must be inside the repository')
   ap.add_argument('--python', help='default: <af3_dir>/.venv/bin/python')
   ap.add_argument('--model_dir', default='~/af3_weights', help='outside the repository')
-  ap.add_argument('--compile_cache', default='fresh', help='fresh or warm:NAME')
+  ap.add_argument('--compile_cache', default='fresh', help='fresh, warm:NAME or none')
   ap.add_argument('--num_recycles', type=int)
   ap.add_argument('--num_diffusion_samples', type=int)
   ap.add_argument('--seeds', help='comma-separated subset of the frozen seeds, for example 1')
@@ -260,14 +319,19 @@ def main():
   ap.add_argument('--entry', action='store_true', help='run through harness/af3_entry.py (memory records)')
   ap.add_argument('--log_compiles', action='store_true', help='record XLA compile times (JAX_LOG_COMPILES=1)')
   ap.add_argument('--save_fresh_cache', help='with fresh caches: keep them in data/jax_cache/NAME')
+  ap.add_argument('--upload_uri', help='gs:// folder: upload this session after each target')
   args = ap.parse_args()
 
   configs = read_configs(CONFIGS)
   if args.config not in configs:
     raise SystemExit(f'Unknown config {args.config}; known: {", ".join(configs)}')
   cfg = configs[args.config]
-  if args.compile_cache != 'fresh' and not re.fullmatch(r'warm:[A-Za-z0-9_.-]+', args.compile_cache):
-    raise SystemExit('--compile_cache must be fresh or warm:NAME')
+  if args.compile_cache not in ('fresh', 'none') and not re.fullmatch(r'warm:[A-Za-z0-9_.-]+',
+                                                                       args.compile_cache):
+    raise SystemExit('--compile_cache must be fresh, warm:NAME or none')
+  if args.upload_uri and not re.fullmatch(r'gs://[a-z0-9][a-z0-9._-]*[a-z0-9](/[A-Za-z0-9._-]+)*/?',
+                                          args.upload_uri):
+    raise SystemExit('--upload_uri must be gs://BUCKET/FOLDER')
   if args.save_fresh_cache and (args.compile_cache != 'fresh'
                                 or not re.fullmatch(r'[A-Za-z0-9_.-]+', args.save_fresh_cache)):
     raise SystemExit('--save_fresh_cache NAME needs --compile_cache fresh and a plain NAME')
@@ -332,9 +396,10 @@ def main():
       'args': dict(vars(args), af3_dir=rel(af3_dir), manifest=rel(manifest_path),
                    python=(os.path.relpath(python, REPO) if python.is_relative_to(REPO)
                            else f'<python: {python.name}>'),
-                   model_dir='<model_dir>'),
+                   model_dir='<model_dir>',
+                   upload_uri='<results bucket>' if args.upload_uri else None),
       'targets': [r['pdb_id'] for r in rows],
-      'compile_cache': {'mode': 'fresh' if warm_dir is None else 'warm',
+      'compile_cache': {'mode': args.compile_cache.split(':')[0],
                         'warm_dir': rel(warm_dir) if warm_dir else None,
                         'warm_at_start': dir_stats(warm_dir) if warm_dir else None},
       'host': host_info(), 'probe': env_probe,
@@ -370,9 +435,11 @@ def main():
       data['modelSeeds'] = seeds
       run_input = work / 'input_seeds.json'
       run_input.write_text(json.dumps(data, indent=2) + '\n')
-    cache_dir = warm_dir if warm_dir else work / 'jax_cache'
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_before = dir_stats(cache_dir)
+    no_cache = args.compile_cache == 'none'
+    cache_dir = None if no_cache else (warm_dir if warm_dir else work / 'jax_cache')
+    if cache_dir:
+      cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_before = dir_stats(cache_dir) if cache_dir else None
 
     def from_af3(path):
       return os.path.relpath(path, af3_dir)
@@ -386,8 +453,9 @@ def main():
            f'--model_dir={model_dir}',
            f'--jax_backend={cfg["jax_backend"]}',
            f'--flash_attention_implementation={cfg["flash_attention_implementation"]}',
-           '--run_data_pipeline=false',
-           f'--jax_compilation_cache_dir={from_af3(cache_dir)}']
+           '--run_data_pipeline=false']
+    if cache_dir:
+      cmd.append(f'--jax_compilation_cache_dir={from_af3(cache_dir)}')
     if args.num_recycles is not None:
       cmd.append(f'--num_recycles={args.num_recycles}')
     if args.num_diffusion_samples is not None:
@@ -416,13 +484,13 @@ def main():
     parsed = parse_log(log_text)
     outputs = sorted(str(p.relative_to(tdir)) for p in (tdir / 'af3_output').rglob('*')
                      if p.is_file() and (p.suffix == '.cif' or p.name.endswith('summary_confidences.json')))
-    cache_after = dir_stats(cache_dir)
+    cache_after = dir_stats(cache_dir) if cache_dir else None
     saved_to = None
-    if warm_dir is None and args.save_fresh_cache:
+    if args.compile_cache == 'fresh' and args.save_fresh_cache:
       dest = REPO / 'data' / 'jax_cache' / args.save_fresh_cache
       shutil.copytree(cache_dir, dest, dirs_exist_ok=True)
       saved_to = rel(dest)
-    if warm_dir is None:
+    if args.compile_cache == 'fresh':
       shutil.rmtree(cache_dir, ignore_errors=True)
     stats = None
     if args.entry and entry_stats.exists():
@@ -439,12 +507,14 @@ def main():
         'command': command, 'input_path': row['input_path'], 'input_sha256': frozen_sha,
         'run_input_sha256': sha256_file(run_input), 'seeds': seeds or json.loads(frozen.read_text())['modelSeeds'],
         'weights_sha256': session_info['weights']['sha256'],
-        'compile_cache': {'mode': session_info['compile_cache']['mode'], 'dir': rel(cache_dir),
+        'compile_cache': {'mode': session_info['compile_cache']['mode'],
+                          'dir': rel(cache_dir) if cache_dir else None,
                           'before': cache_before, 'after': cache_after},
         'output_dir': str((tdir / 'af3_output').relative_to(REPO)), 'outputs': outputs,
         'failure': classify_failure(rc, timed_out, log_text),
         'compile': parse_compiles(log_text),
         'entry': args.entry, 'entry_stats': stats,
+        'memory': memory_summary(stats),
     }
     record['compile_cache']['saved_to'] = saved_to
     record = scrub(record)
@@ -457,6 +527,8 @@ def main():
     print(f'    exit {rc}{" (timed out)" if timed_out else ""}, wall {wall:.1f} s, '
           f'inference by seed {inf}, outputs {len(outputs)}'
           f'{", failure " + record["failure"] if record["failure"] else ""}', flush=True)
+    if args.upload_uri:
+      upload(out_dir, args.upload_uri.rstrip('/'))
 
   print(f'>> Done: {len(rows) - failures}/{len(rows)} targets ok. results/af3/{session}/', flush=True)
   sys.exit(1 if failures else 0)

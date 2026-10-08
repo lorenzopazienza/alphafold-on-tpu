@@ -21,6 +21,10 @@ Exit status: 0 if every harness run exited 0, 1 otherwise.
 
 --describe prints the expanded plan as JSON and runs nothing; cloud/af3_run.sh
 uses it on the laptop to choose uploads and to size the VM's lifetime.
+--upload_uri gs://FOLDER (optional, the session's folder in the results
+bucket): each harness run uploads its folder after every target, and the whole
+session folder (plan_runs.jsonl, setup records, logs) is uploaded after every
+harness run. An upload failure is printed and never stops the plan.
 Standard library only.
 """
 
@@ -35,7 +39,7 @@ import sys
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / 'harness'))
-from run_af3 import read_configs  # noqa: E402
+from run_af3 import read_configs, upload  # noqa: E402
 
 PLATFORMS = ('cpu', 'l4', 'v5e', 'v6e')
 
@@ -122,6 +126,7 @@ def main():
   ap.add_argument('--describe', action='store_true', help='print the expanded plan as JSON')
   ap.add_argument('--session', help='results/af3/<session>/ holds every run of this plan')
   ap.add_argument('--model_dir', default='~/af3_weights')
+  ap.add_argument('--upload_uri', help='gs:// folder of this session in the results bucket')
   args = ap.parse_args()
 
   desc = expand(REPO / args.plan, args.platform, REPO / args.manifest)
@@ -153,6 +158,8 @@ def main():
       cmd += ['--num_recycles', str(desc['num_recycles'])]
     if desc['num_diffusion_samples'] is not None:
       cmd += ['--num_diffusion_samples', str(desc['num_diffusion_samples'])]
+    if args.upload_uri:
+      cmd += ['--upload_uri', f'{args.upload_uri.rstrip("/")}/{run["run"]}']
     print(f'>> [{i}/{len(desc["runs"])}] {run["run"]}: {len(desc["targets"])} targets', flush=True)
     start = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')
     rc = subprocess.run(cmd, cwd=REPO).returncode
@@ -160,6 +167,8 @@ def main():
     with open(log, 'a') as f:
       f.write(json.dumps(dict(run, start_utc=start, harness_exit_code=rc,
                               session=f'{args.session}/{run["run"]}')) + '\n')
+    if args.upload_uri:
+      upload(log.parent, args.upload_uri.rstrip('/'))
   print(f'>> Plan done: {len(desc["runs"]) - failed}/{len(desc["runs"])} harness runs exited 0',
         flush=True)
   sys.exit(1 if failed else 0)
