@@ -1,0 +1,37 @@
+# Probe: sizes the pilot. Random weights, AlphaFold3 defaults (10 recycles,
+# 5 diffusion samples), seed 1, one fresh-cache repetition. It measures time,
+# compile time and memory per platform; with random weights it says nothing
+# about accuracy. 7D5C (1023 tokens) is the 16 GB memory test on v5e. CPU runs
+# only the two smallest pilot targets, as 1023 tokens on CPU may take hours.
+#
+# Format: the YAML subset of harness/configs.yaml, plus inline lists [a, b].
+# A key with per-platform values may give "default" for the others.
+
+description: probe with random weights (time, compile time and memory per platform)
+label: probe
+weights: random
+
+configs:
+  cpu: cpu_xla
+  l4: l4_xla
+  v5e: tpu_xla
+  v6e: tpu_xla
+
+targets:
+  default: [7U3J, 7D5C]
+  cpu: [7U3J, 7NP6]
+
+seeds: [1]
+fresh_reps: 1
+warm_rerun_seed: none
+num_recycles: default
+num_diffusion_samples: default
+run_timeout_min: 180
+
+# Minutes the laptop follows the run, setup included (about 15 min). The VM's
+# lifetime (--max-run-duration, or the legacy TPU watchdog) is this plus 30.
+deadline_min:
+  cpu: 270
+  l4: 90
+  v5e: 90
+  v6e: 90

@@ -26,6 +26,21 @@ packages, device, weights and manifest hashes), runs.jsonl (one line per
 target), and per target command.txt, run_alphafold.log, run.json and
 af3_output/. An existing session is never overwritten; results/ is gitignored.
 
+Optional records (flags):
+  --entry             run run_alphafold.py's main through harness/af3_entry.py,
+                      which writes peak device memory (GPU, TPU) and the
+                      process's max RSS to af3_entry_stats.json at exit;
+  --log_compiles      set JAX_LOG_COMPILES=1 and record XLA compile seconds
+                      for the model (jit(apply_fn)) and in total, and whether
+                      the persistent cache was hit; AlphaFold3's own log does
+                      not separate compilation from inference;
+  --save_fresh_cache NAME
+                      with --compile_cache fresh, merge each process's new
+                      cache into data/jax_cache/NAME before deleting it, so a
+                      later warm:NAME rerun reuses exactly those executables.
+A failed run is recorded with failure = oom, timeout, signal N or error, and
+the harness goes on with the next target.
+
 Records hold no absolute paths and no hostname. Paths are relative to the
 repository root; the recorded command is the one that ran, from the repository
 root, except that the weights folder (outside the repository by rule) appears
@@ -184,6 +199,36 @@ LOG_PATTERNS = {
 }
 
 
+COMPILE_LINE = re.compile(r'Finished XLA compilation of jit\(([^)]*)\) in ([\d.]+) sec')
+CACHE_HIT_LINE = re.compile(r"Persistent compilation cache hit for '([^']*)'")
+OOM_LINE = re.compile(r'RESOURCE_EXHAUSTED|[Oo]ut of memory|\bOOM\b')
+
+
+def parse_compiles(text):
+  """XLA compile times from JAX_LOG_COMPILES output; None if not logged."""
+  times = [(m.group(1), float(m.group(2))) for m in COMPILE_LINE.finditer(text)]
+  if not times:
+    return None
+  hits = [m.group(1) for m in CACHE_HIT_LINE.finditer(text)]
+  model = [t for name, t in times if name == 'apply_fn']
+  return {'model_seconds': round(sum(model), 3) if model else None,
+          'model_compiles': len(model),
+          'total_seconds': round(sum(t for _, t in times), 3), 'compiles': len(times),
+          'cache_hits': len(hits), 'model_cache_hit': 'jit_apply_fn' in hits}
+
+
+def classify_failure(rc, timed_out, text):
+  if rc == 0 and not timed_out:
+    return None
+  if timed_out:
+    return 'timeout'
+  if OOM_LINE.search(text):
+    return 'oom'
+  if rc < 0:
+    return f'signal {-rc}'  # 9 is often the kernel OOM killer
+  return 'error'
+
+
 def parse_log(text):
   out = {}
   for key, pat in LOG_PATTERNS.items():
@@ -212,6 +257,9 @@ def main():
   ap.add_argument('--order', choices=('manifest', 'tokens'), default='manifest')
   ap.add_argument('--limit', type=int, help='run only the first N targets after ordering')
   ap.add_argument('--timeout_min', type=float, default=180)
+  ap.add_argument('--entry', action='store_true', help='run through harness/af3_entry.py (memory records)')
+  ap.add_argument('--log_compiles', action='store_true', help='record XLA compile times (JAX_LOG_COMPILES=1)')
+  ap.add_argument('--save_fresh_cache', help='with fresh caches: keep them in data/jax_cache/NAME')
   args = ap.parse_args()
 
   configs = read_configs(CONFIGS)
@@ -220,6 +268,9 @@ def main():
   cfg = configs[args.config]
   if args.compile_cache != 'fresh' and not re.fullmatch(r'warm:[A-Za-z0-9_.-]+', args.compile_cache):
     raise SystemExit('--compile_cache must be fresh or warm:NAME')
+  if args.save_fresh_cache and (args.compile_cache != 'fresh'
+                                or not re.fullmatch(r'[A-Za-z0-9_.-]+', args.save_fresh_cache)):
+    raise SystemExit('--save_fresh_cache NAME needs --compile_cache fresh and a plain NAME')
   af3_dir = (REPO / args.af3_dir).resolve()
   if not af3_dir.is_relative_to(REPO):
     raise SystemExit('--af3_dir must be inside the repository, so records can use relative paths.')
@@ -264,6 +315,8 @@ def main():
 
   env = dict(os.environ, PYTHONUNBUFFERED='1')
   env.update(cfg.get('env', {}))
+  extra_env = {'JAX_LOG_COMPILES': '1'} if args.log_compiles else {}
+  env.update(extra_env)
   warm_dir = None
   if args.compile_cache.startswith('warm:'):
     warm_dir = REPO / 'data' / 'jax_cache' / args.compile_cache.split(':', 1)[1]
@@ -324,7 +377,10 @@ def main():
     def from_af3(path):
       return os.path.relpath(path, af3_dir)
 
-    cmd = [python_arg, 'run_alphafold.py',
+    entry_stats = tdir / 'af3_entry_stats.json'
+    run_env = dict(env, AF3_ENTRY_STATS=from_af3(entry_stats)) if args.entry else env
+    script = from_af3(REPO / 'harness' / 'af3_entry.py') if args.entry else 'run_alphafold.py'
+    cmd = [python_arg, script,
            f'--json_path={from_af3(run_input)}',
            f'--output_dir={from_af3(tdir / "af3_output")}',
            f'--model_dir={model_dir}',
@@ -336,7 +392,10 @@ def main():
       cmd.append(f'--num_recycles={args.num_recycles}')
     if args.num_diffusion_samples is not None:
       cmd.append(f'--num_diffusion_samples={args.num_diffusion_samples}')
-    env_prefix = ' '.join(f'{k}={shlex.quote(v)}' for k, v in cfg.get('env', {}).items())
+    shown_env = dict(cfg.get('env', {}), **extra_env)
+    if args.entry:
+      shown_env['AF3_ENTRY_STATS'] = run_env['AF3_ENTRY_STATS']
+    env_prefix = ' '.join(f'{k}={shlex.quote(v)}' for k, v in shown_env.items())
     shown = [python_shown] + [a if not a.startswith('--model_dir=') else '--model_dir=<model_dir>'
                               for a in cmd[1:]]
     command = f'cd {shlex.quote(rel(af3_dir))} && {env_prefix + " " if env_prefix else ""}{shlex.join(shown)}'
@@ -346,19 +405,31 @@ def main():
           flush=True)
     start_utc, t0, timed_out = utc_now(), time.monotonic(), False
     with open(tdir / 'run_alphafold.log', 'w') as log:
-      proc = subprocess.Popen(cmd, cwd=af3_dir, env=env, stdout=log, stderr=subprocess.STDOUT)
+      proc = subprocess.Popen(cmd, cwd=af3_dir, env=run_env, stdout=log, stderr=subprocess.STDOUT)
       try:
         rc = proc.wait(timeout=args.timeout_min * 60)
       except subprocess.TimeoutExpired:
         proc.kill()
         rc, timed_out = proc.wait(), True
     wall = time.monotonic() - t0
-    parsed = parse_log((tdir / 'run_alphafold.log').read_text(errors='replace'))
+    log_text = (tdir / 'run_alphafold.log').read_text(errors='replace')
+    parsed = parse_log(log_text)
     outputs = sorted(str(p.relative_to(tdir)) for p in (tdir / 'af3_output').rglob('*')
                      if p.is_file() and (p.suffix == '.cif' or p.name.endswith('summary_confidences.json')))
     cache_after = dir_stats(cache_dir)
+    saved_to = None
+    if warm_dir is None and args.save_fresh_cache:
+      dest = REPO / 'data' / 'jax_cache' / args.save_fresh_cache
+      shutil.copytree(cache_dir, dest, dirs_exist_ok=True)
+      saved_to = rel(dest)
     if warm_dir is None:
       shutil.rmtree(cache_dir, ignore_errors=True)
+    stats = None
+    if args.entry and entry_stats.exists():
+      try:
+        stats = json.loads(entry_stats.read_text())
+      except ValueError:
+        stats = {'error': 'unreadable af3_entry_stats.json'}
     record = {
         'session': session, 'config': args.config, 'label': args.label, 'pdb_id': row['pdb_id'],
         'num_tokens': int(row['num_tokens']), 'bucket': int(row['bucket']),
@@ -371,7 +442,11 @@ def main():
         'compile_cache': {'mode': session_info['compile_cache']['mode'], 'dir': rel(cache_dir),
                           'before': cache_before, 'after': cache_after},
         'output_dir': str((tdir / 'af3_output').relative_to(REPO)), 'outputs': outputs,
+        'failure': classify_failure(rc, timed_out, log_text),
+        'compile': parse_compiles(log_text),
+        'entry': args.entry, 'entry_stats': stats,
     }
+    record['compile_cache']['saved_to'] = saved_to
     record = scrub(record)
     write_json(tdir / 'run.json', record)
     with open(out_dir / 'runs.jsonl', 'a') as f:
@@ -380,7 +455,8 @@ def main():
     failures += not ok
     inf = parsed['inference_seconds_by_seed']
     print(f'    exit {rc}{" (timed out)" if timed_out else ""}, wall {wall:.1f} s, '
-          f'inference by seed {inf}, outputs {len(outputs)}', flush=True)
+          f'inference by seed {inf}, outputs {len(outputs)}'
+          f'{", failure " + record["failure"] if record["failure"] else ""}', flush=True)
 
   print(f'>> Done: {len(rows) - failures}/{len(rows)} targets ok. results/af3/{session}/', flush=True)
   sys.exit(1 if failures else 0)

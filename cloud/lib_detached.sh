@@ -9,11 +9,16 @@
 #   DETACHED_POLL_S         seconds between polls                   (60)
 #   DETACHED_MAX_SSH_FAILS  consecutive failed polls before giving up (10)
 #   DETACHED_DEADLINE_MIN   minutes before polling stops            (60)
+#   DETACHED_SCRIPT         script started on the VM, relative to ~/alphafold-on-tpu
+#                           (af3_tpu/vm_smoke.sh)
+#   DETACHED_LOG            log in ~/OUT whose last line each poll prints (vm_smoke.log)
 # Written for macOS bash 3.2: no arrays, no associative arrays.
 
 DETACHED_POLL_S="${DETACHED_POLL_S:-60}"
 DETACHED_MAX_SSH_FAILS="${DETACHED_MAX_SSH_FAILS:-10}"
 DETACHED_DEADLINE_MIN="${DETACHED_DEADLINE_MIN:-60}"
+DETACHED_SCRIPT="${DETACHED_SCRIPT:-af3_tpu/vm_smoke.sh}"
+DETACHED_LOG="${DETACHED_LOG:-vm_smoke.log}"
 DETACHED_RC=""
 
 # detached_start OUT "VAR=value ...": start `VAR=value ... bash
@@ -27,7 +32,7 @@ detached_start() {
   local cmd="O=\$HOME/$out; mkdir -p \$O && cd \$HOME/alphafold-on-tpu || exit 1
 if [ -f \$O/EXIT_CODE ]; then echo \"   already finished\"; exit 0; fi
 if [ -f \$O/PID ] && kill -0 \$(cat \$O/PID) 2>/dev/null; then echo \"   already running, pid \$(cat \$O/PID)\"; exit 0; fi
-nohup setsid bash -c '$env bash af3_tpu/vm_smoke.sh \"\$0\"; echo \$? > \"\$0/EXIT_CODE.tmp\"; mv \"\$0/EXIT_CODE.tmp\" \"\$0/EXIT_CODE\"' \$O > \$O/nohup.out 2>&1 < /dev/null &
+nohup setsid bash -c '$env bash $DETACHED_SCRIPT \"\$0\"; echo \$? > \"\$0/EXIT_CODE.tmp\"; mv \"\$0/EXIT_CODE.tmp\" \"\$0/EXIT_CODE\"' \$O > \$O/nohup.out 2>&1 < /dev/null &
 echo \$! > \$O/PID
 echo \"   started, pid \$!\""
   for try in 1 2 3; do
@@ -53,9 +58,9 @@ elif [ -f \$O/EXIT_CODE ]; then
 else
   echo '@@ GONE'
 fi
-tail -n 1 \$O/vm_smoke.log 2>/dev/null | cut -c1-160"
+tail -n 1 \$O/$DETACHED_LOG 2>/dev/null | cut -c1-160"
   start=$(date +%s)
-  echo ">> Following vm_smoke.sh: a poll every ${DETACHED_POLL_S}s, deadline ${DETACHED_DEADLINE_MIN} min"
+  echo ">> Following $DETACHED_SCRIPT: a poll every ${DETACHED_POLL_S}s, deadline ${DETACHED_DEADLINE_MIN} min"
   while :; do
     sleep "$DETACHED_POLL_S"
     now=$(date +%s)
@@ -68,13 +73,13 @@ tail -n 1 \$O/vm_smoke.log 2>/dev/null | cut -c1-160"
           case "$DETACHED_RC" in
             ''|*[!0-9]*) echo "!! Unreadable EXIT_CODE on the VM: '$DETACHED_RC'"; return 1 ;;
           esac
-          echo ">> vm_smoke.sh finished with exit code $DETACHED_RC"
+          echo ">> $DETACHED_SCRIPT finished with exit code $DETACHED_RC"
           return 0 ;;
         "@@ RUNNING")
           fails=0
           echo "   $(date -u +%H:%M:%SZ) running | $line" ;;
         "@@ GONE")
-          echo "!! vm_smoke.sh is no longer running on the VM and left no EXIT_CODE"
+          echo "!! $DETACHED_SCRIPT is no longer running on the VM and left no EXIT_CODE"
           return 1 ;;
         *)
           fails=$((fails + 1))
@@ -89,7 +94,7 @@ tail -n 1 \$O/vm_smoke.log 2>/dev/null | cut -c1-160"
       return 1
     fi
     if [ $((now - start)) -ge $((DETACHED_DEADLINE_MIN * 60)) ]; then
-      echo "!! Deadline: vm_smoke.sh still not finished after $DETACHED_DEADLINE_MIN min"
+      echo "!! Deadline: $DETACHED_SCRIPT still not finished after $DETACHED_DEADLINE_MIN min"
       return 1
     fi
   done

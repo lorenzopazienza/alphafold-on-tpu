@@ -1,0 +1,11 @@
+platform,machine_type,region,default_zone,provisioning,usd_per_hour,unit,source_url,read_on,notes
+cpu,n2-highmem-16,europe-west4,europe-west4-a,standard,1.153824,machine-hour,https://cloud.google.com/products/compute/pricing/general-purpose,2026-10-08,on-demand; 16 vCPU 128 GiB; excludes boot disk
+cpu,n2-highmem-16,europe-west4,europe-west4-a,spot,0.321312,machine-hour,https://cloud.google.com/spot-vms/pricing,2026-10-08,Spot prices are dynamic (can change up to once every 30 days)
+l4,g2-standard-8,europe-west4,europe-west4-a,standard,0.897201806,machine-hour,https://cloud.google.com/products/compute/pricing/accelerator-optimized,2026-10-08,on-demand; machine price includes 1 x NVIDIA L4; excludes boot disk
+l4,g2-standard-8,europe-west4,europe-west4-a,spot,0.538252,machine-hour,https://cloud.google.com/spot-vms/pricing,2026-10-08,includes 1 x NVIDIA L4; Spot prices are dynamic
+v5e,v5litepod-1,europe-west4,europe-west4-b,standard,1.56,chip-hour,https://cloud.google.com/tpu/pricing,2026-10-08,TPU v5e on demand; 1 chip
+v5e,v5litepod-1,europe-west4,europe-west4-b,spot,0.562398,chip-hour,https://cloud.google.com/spot-vms/pricing,2026-10-08,TPU v5e Spot; dynamic
+v5e,v5litepod-1,europe-west4,europe-west4-b,flex_start,0.60,chip-hour,https://cloud.google.com/tpu/pricing,2026-10-08,DWS Flex-start; not used by cloud/af3_run.sh (v5e runs through the legacy TPU API)
+v6e,ct6e-standard-1t,europe-west4,europe-west4-a,flex_start,1.35,chip-hour,https://cloud.google.com/tpu/pricing,2026-10-08,Trillium DWS Flex-start; billed only while running
+v6e,ct6e-standard-1t,europe-west4,europe-west4-a,standard,2.97,chip-hour,https://cloud.google.com/tpu/pricing,2026-10-08,Trillium on demand; not used by the launcher's default
+v6e,ct6e-standard-1t,europe-west4,europe-west4-a,spot,1.782,chip-hour,https://cloud.google.com/spot-vms/pricing,2026-10-08,Trillium Spot; dynamic; not used by the launcher's default

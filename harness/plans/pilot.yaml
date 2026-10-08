@@ -1,0 +1,37 @@
+# Pilot: does hardware change AlphaFold3's outputs more than recompilation
+# does? The 10 pilot targets (inputs/manifest.csv, pilot = yes), seeds 1 and 2,
+# two fresh-cache repetitions each, and one warm-cache rerun of seed 1 that
+# reuses the executables compiled by its source run (rep 1, seed 1) and is
+# expected to be bit-identical to it. Official weights from Lorenzo's private
+# bucket (WEIGHTS=gcs). CPU runs only the pilot targets at or under 512 tokens.
+#
+# Per platform: 5 harness runs x the targets, each target a fresh process.
+
+description: pilot with the official weights (hardware versus recompilation variability)
+label: pilot
+weights: gcs
+
+configs:
+  cpu: cpu_xla
+  l4: l4_xla
+  v5e: tpu_xla
+  v6e: tpu_xla
+
+targets:
+  default: pilot
+
+max_tokens:
+  cpu: 512
+  default: none
+
+seeds: [1, 2]
+fresh_reps: 2
+warm_rerun_seed: 1
+num_recycles: default
+num_diffusion_samples: default
+run_timeout_min: 180
+
+# Not sized yet: set these from the probe's timings before launching.
+# cloud/af3_run.sh refuses a deadline of 0.
+deadline_min:
+  default: 0
