@@ -185,6 +185,33 @@ Whatever happens, the script then copies `~/af3_smoke/<session>/` back to
 `af3_output/`, and `session.json` with the AlphaFold3 commit, patch SHA-256,
 package versions, accelerator, zone, exact command, exit code and wall time.
 
+## Flex-start (Compute Engine) for v6e
+
+On 2026-10-08 every `v6e-1` request through the TPU API failed for lack of
+capacity (Spot and on-demand). `cloud/af3_tpu_smoke_gce.sh` asks for the same
+single chip through the Compute Engine API instead, as machine type
+`ct6e-standard-1t` with the Flex-start provisioning model. The request waits
+in a queue until capacity is free, for at most `REQUEST_VALID_FOR` (default
+`2h`).
+
+```bash
+bash cloud/af3_tpu_smoke_gce.sh                          # europe-west4-a
+ZONE=us-east5-a bash cloud/af3_tpu_smoke_gce.sh          # another v6e zone
+```
+
+Once the VM is running, the script runs the same unchanged `vm_smoke.sh` and
+copies results to `results/af3_smoke/<timestamp>_ct6e-standard-1t/`. In
+`session.json`, `accelerator` is the machine type and `runtime` is the image
+family (`ubuntu-accel-2204-amd64-tpu-v5e-v5p-v6e` from
+`ubuntu-os-accelerator-images`).
+
+The VM is deleted in two independent ways: Google deletes it
+`MAX_RUN_DURATION` (default `2h`) after it starts
+(`--max-run-duration` with `--instance-termination-action=DELETE`), even if
+the Mac goes offline, and the script deletes it when it ends, also on error or
+Ctrl-C. There is no systemd watchdog on this path. If the boot disk type is
+rejected, retry with `BOOT_DISK_TYPE=hyperdisk-balanced`.
+
 ## Licences
 
 AlphaFold3's code is under Apache 2.0 (since v3.0.3). `af3_tpu.patch` contains
