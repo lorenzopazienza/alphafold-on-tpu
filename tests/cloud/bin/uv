@@ -1,0 +1,12 @@
+#!/bin/bash
+# Fake uv for the bisection's venv copies: pip install / pip freeze only.
+echo "uv $*" >> "${FAKE_LOG:-/dev/null}"
+case "$1 $2" in
+  "pip install")
+    for a in "$@"; do
+      case "$a" in *${FAKE_UV_FAIL:-@@none@@}*) echo "error: fake failure installing $a" >&2; exit 1 ;; esac
+    done
+    echo "Installed (fake): ${*:3}" ;;
+  "pip freeze") echo "jax==fake"; echo "libtpu==fake" ;;
+  *) echo "uv 0.0.0 (fake)" ;;
+esac

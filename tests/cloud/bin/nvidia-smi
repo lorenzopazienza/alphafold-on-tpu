@@ -1,0 +1,8 @@
+#!/bin/bash
+# Fake nvidia-smi: what the real one printed on the L4 VM (2026-10-09).
+[ "${FAKE_NO_GPU:-0}" = "1" ] && { echo "NVIDIA-SMI has failed because it couldn't communicate with the NVIDIA driver." ; exit 9; }
+case "$*" in
+  *--query-gpu*) echo "NVIDIA L4, 580.178.04, 23034 MiB" ;;
+  *) echo "| NVIDIA-SMI 580.178.04   Driver Version: 580.178.04   CUDA Version: 13.0 |"
+     echo "|   0  NVIDIA L4   On  | 00000000:00:03.0 Off |  0 |  23034MiB |" ;;
+esac

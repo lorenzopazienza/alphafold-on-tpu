@@ -1,0 +1,149 @@
+#!/bin/bash
+# Fake gcloud for cloud/af3_run.sh and cloud/v5e_bisect.sh tests. Never contacts Google Cloud.
+# SSH commands run for real in $FAKE_HOME; failures are injected per $FAKE_SCENARIO:
+#   drop       polls 2-4 fail, then recover            lost       every poll from the 2nd fails
+#   preempt    from poll FAKE_PREEMPT_POLL (2): SSH fails, describe says PREEMPTED (tpu) or TERMINATED (gce)
+#   preempt_gone  likewise, describe says NOT_FOUND
+#   fetchfail  every download (scp from the VM) fails   uploadfail  storage rsync to gs:// fails
+# A fake bucket lives in $FAKE_DIR/bucket (gs://B/P -> $FAKE_DIR/bucket/B/P).
+# Zones (Compute Engine): FAKE_ZONES="zone:behaviour ..." (unlisted zones: ok)
+#   sync      create fails at once with a STOCKOUT message
+#   quota     create fails at once with a quota error (not capacity)
+#   suggest   create accepted; STAGING, STOPPING, then gone; the insert operation
+#             holds the real us-east4-c error (zonesAvailable: us-east4-a)
+#   none      like suggest, with the real us-central1-b error (no suggestion)
+#   leftover  create accepted; STAGING, then TERMINATED and kept until deleted;
+#             operation error: the real Flex-start europe-west4-a one
+#   ok        the VM is created and runs
+echo "gcloud $*" >> "$FAKE_LOG"
+counter() { local n; n=$(cat "$FAKE_DIR/$1" 2>/dev/null || echo 0); n=$((n + 1)); echo $n > "$FAKE_DIR/$1"; echo $n; }
+peek() { cat "$FAKE_DIR/$1" 2>/dev/null || echo 0; }
+cmd="" prev="" Z="" FMT=""
+for a in "$@"; do
+  [ "$prev" = "--command" ] && cmd="$a"
+  case "$a" in
+    --command=*) cmd="${a#--command=}" ;;
+    --zone=*) Z="${a#--zone=}" ;;
+    --zones=*) Z="${a#--zones=}" ;;
+    --format=*) FMT="${a#--format=}" ;;
+  esac
+  prev="$a"
+done
+behaviour() { local zb; for zb in ${FAKE_ZONES:-}; do [ "${zb%%:*}" = "$1" ] && { echo "${zb#*:}"; return; }; done; echo ok; }
+B=$(behaviour "$Z")
+if [ "$1 $2" = "storage cp" ]; then          # on the VM: weights from the bucket
+  echo "Copying $3 to file://$4" >&2
+  head -c 4096 /dev/urandom > "$4/$(basename "$3")"
+  exit 0
+fi
+if [ "$1 $2" = "storage rsync" ]; then        # VM uploads and laptop downloads
+  exec python3 "$FAKE_KIT/bin/fake_rsync.py" "$@"
+fi
+if [ "$2" = "tpus" ]; then group=tpu verb=$4; else group=gce verb=$3; fi
+[ "$2" = "ssh" ] && verb=ssh
+[ "$2" = "scp" ] && verb=scp
+[ "$2" = "operations" ] && verb=oplist
+gone_now() {
+  case "$FAKE_SCENARIO" in preempt | preempt_gone) [ "$(peek polls)" -ge "${FAKE_PREEMPT_POLL:-2}" ] ;; *) return 1 ;; esac
+}
+fixture() { case "$1" in suggest) echo op_us-east4-c ;; none) echo op_us-central1-b ;; leftover) echo op_flex_europe-west4-a ;; esac; }
+# A failing zone's insert operation is DONE once the VM has been seen twice.
+async_done() { [ "$(peek "describe_$1")" -ge 2 ]; }
+
+if [ "$group" = gce ] && [ "$B" != ok ]; then
+  case "$verb" in
+    create)
+      echo "$Z" >> "$FAKE_DIR/zones_tried"
+      case "$B" in
+        sync)
+          printf "ERROR: (gcloud.compute.instances.create) Could not fetch resource:\n - The zone 'projects/p/zones/%s' does not have enough resources available to fulfill the request.  '(resource type:compute)'.\n" "$Z" >&2
+          exit 1 ;;
+        quota)
+          printf "ERROR: (gcloud.compute.instances.create) Could not fetch resource:\n - Quota 'NVIDIA_L4_GPUS' exceeded.  Limit: 0.0 in region %s.\n" "${Z%-*}" >&2
+          exit 1 ;;
+        *) touch "$FAKE_DIR/zone_$Z"; echo "Created [https://compute.googleapis.com/compute/v1/projects/p/zones/$Z/operations/operation-fake]." ;;
+      esac ;;
+    describe)
+      [ -f "$FAKE_DIR/zone_$Z" ] || { echo "ERROR: (gcloud) NOT_FOUND: Resource not found" >&2; exit 1; }
+      n=$(counter "describe_$Z")
+      case "$B:$n" in
+        *:1) echo STAGING ;;
+        leftover:*) echo TERMINATED ;;
+        *:2) echo STOPPING ;;
+        *) rm -f "$FAKE_DIR/zone_$Z"; echo "ERROR: (gcloud) NOT_FOUND: Resource not found" >&2; exit 1 ;;
+      esac ;;
+    delete)
+      [ -f "$FAKE_DIR/zone_$Z" ] || { echo "ERROR: (gcloud) NOT_FOUND" >&2; exit 1; }
+      rm "$FAKE_DIR/zone_$Z"; echo "$Z" >> "$FAKE_DIR/zones_deleted"; echo "deleted (fake)" >&2 ;;
+    oplist)
+      f="$FAKE_KIT/fixtures/$(fixture "$B").json"
+      case "$FMT" in
+        "value(status)") async_done "$Z" && echo DONE || echo RUNNING ;;
+        json) if async_done "$Z"; then cat "$f"; else echo '[{"status": "RUNNING"}]'; fi ;;
+        *) async_done "$Z" && python3 -c "import json,sys; print(json.load(open(sys.argv[1]))[0]['error']['errors'][0]['message'])" "$f" ;;
+      esac ;;
+    *) echo "fake gcloud: unhandled in zone $Z: $*" >&2; exit 2 ;;
+  esac
+  exit 0
+fi
+
+case "$verb" in
+  describe)
+    [ -f "$FAKE_DIR/created" ] || { echo "ERROR: (gcloud) NOT_FOUND: Resource not found" >&2; exit 1; }
+    if gone_now; then
+      if [ "$FAKE_SCENARIO" = preempt_gone ]; then echo "ERROR: (gcloud) NOT_FOUND: Resource not found" >&2; exit 1; fi
+      [ "$group" = tpu ] && echo PREEMPTED || echo TERMINATED; exit 0
+    fi
+    [ "$group" = tpu ] && echo READY || echo RUNNING ;;
+  create)
+    [ -n "$Z" ] && echo "$Z" >> "$FAKE_DIR/zones_tried"
+    echo "$*" > "$FAKE_DIR/create_args"; touch "$FAKE_DIR/created"; echo "$Z" > "$FAKE_DIR/created_zone"; echo "create (fake) accepted" ;;
+  delete)
+    [ -f "$FAKE_DIR/created" ] || { echo "ERROR: not found" >&2; exit 1; }
+    if gone_now && [ "$FAKE_SCENARIO" = preempt_gone ]; then
+      rm "$FAKE_DIR/created"; touch "$FAKE_DIR/gone"; echo "ERROR: (gcloud) NOT_FOUND" >&2; exit 1
+    fi
+    rm "$FAKE_DIR/created"; touch "$FAKE_DIR/deleted"; echo "deleted (fake)" >&2 ;;
+  list)
+    printf 'other-vm\teurope-west4-a\te2-micro\tRUNNING\n'
+    [ -f "$FAKE_DIR/created" ] && printf 'af3-run-still-here\teurope-west4-a\tx\tRUNNING\n'
+    for f in "$FAKE_DIR"/zone_*; do [ -e "$f" ] && printf 'af3-run-left-in-%s\t%s\tx\tTERMINATED\n' "${f##*/zone_}" "${f##*/zone_}"; done; true ;;
+  oplist)
+    case "$FMT" in json) echo '[{"status": "DONE"}]' ;; "value(status)") echo DONE ;; *) true ;; esac ;;
+  ssh)
+    if gone_now; then echo "ssh: connect to host: Connection refused" >&2; exit 255; fi
+    case "$cmd" in
+      *"@@ RUNNING"*)
+        n=$(counter polls)
+        case "$FAKE_SCENARIO" in
+          drop) if [ "$n" -ge 2 ] && [ "$n" -le 4 ]; then echo "client_loop: send disconnect: Broken pipe" >&2; exit 255; fi ;;
+          lost) if [ "$n" -ge 2 ]; then echo "ssh: connect to host: Operation timed out" >&2; exit 255; fi ;;
+          preempt | preempt_gone) if [ "$n" -ge "${FAKE_PREEMPT_POLL:-2}" ]; then echo "ssh: connect to host: Connection refused" >&2; exit 255; fi ;;
+        esac ;;
+      *systemd-run*) echo "watchdog armed (fake)"; exit 0 ;;
+    esac
+    HOME="$FAKE_HOME" PATH="$FAKE_KIT/bin:$PATH" /bin/bash -c "$cmd"; rc=$?
+    case "$cmd" in
+      *"tar xzf"*)   # after extraction: the setup test double, and optional tampering
+        cp "$FAKE_KIT/vm/vm_af3_setup.sh" "$FAKE_HOME/alphafold-on-tpu/cloud/vm_af3_setup.sh"
+        if [ "$FAKE_SCENARIO" = "tamper_remote" ]; then echo ' ' >> "$FAKE_HOME/alphafold-on-tpu/data/inputs/7D5C.json"; fi ;;
+    esac
+    exit $rc ;;
+  scp)
+    remote="" local="" src_remote=0 first=1
+    for a in "$@"; do
+      case "$a" in
+        compute | tpus | tpu-vm | scp | --*) ;;
+        *:*) remote="${a#*:}"; [ "$first" = 1 ] && src_remote=1; first=0 ;;
+        *) local="$a"; first=0 ;;
+      esac
+    done
+    if gone_now; then echo "scp: Connection refused" >&2; exit 255; fi
+    if [ "$src_remote" = 1 ]; then   # download from the VM
+      case "$FAKE_SCENARIO" in lost | fetchfail) echo "scp: Operation timed out" >&2; exit 255 ;; esac
+      cp -R "$FAKE_HOME/$remote" "$local"
+    else
+      mkdir -p "$(dirname "$FAKE_HOME/$remote")"; cp "$local" "$FAKE_HOME/$remote"
+    fi ;;
+  *) echo "fake gcloud: unhandled: $*" >&2; exit 2 ;;
+esac

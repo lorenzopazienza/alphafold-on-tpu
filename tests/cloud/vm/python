@@ -1,0 +1,35 @@
+#!/bin/bash
+# Fake AlphaFold3 venv python. Records JAX_PLATFORMS on every call and, like
+# JAX 0.10.2, fails if it names "gpu" (expands to cuda, rocm, oneapi) or "rocm"
+# on a machine without ROCm. "-" (stdin script) is the device check: real
+# python for FAKE_PLATFORM=cpu, emulated otherwise.
+echo "$(basename "$(dirname "$(dirname "$0")")") ${1:-} JAX_PLATFORMS=${JAX_PLATFORMS-<unset>}" >> "$FAKE_DIR/jax_platforms.log"
+case "${JAX_PLATFORMS:-}" in
+  *gpu* | *rocm*)
+    echo "RuntimeError: Unable to initialize backend 'rocm': Backend 'rocm' is not in the list of known backends: ['cpu', 'tpu', 'cuda']. (set JAX_PLATFORMS='' to automatically choose an available backend)" >&2
+    exit 1 ;;
+esac
+case "$FAKE_PLATFORM" in cpu) b=cpu k=cpu ;; l4) b=gpu k="NVIDIA L4" ;; v5e) b=tpu k="TPU v5 lite" ;; v6e) b=tpu k="TPU v6 lite" ;; esac
+if [ "${1:-}" = "-c" ]; then
+  echo "{\"python\": \"3.12.6\", \"packages\": {\"jax\": \"0.10.2\", \"jaxlib\": \"0.10.2\"}, \"default_backend\": \"$b\", \"devices\": [\"fake:0\"], \"device_kind\": \"$k\"}"
+  exit 0
+fi
+if [ "${1:-}" = "-" ] && [ "$FAKE_PLATFORM" != "cpu" ]; then
+  cat > /dev/null
+  out=$2 report=$6
+  if [ "${FAKE_SCENARIO:-}" = "devfail" ]; then
+    printf '## jax.devices() failed:\nTraceback (most recent call last):\nRuntimeError: Unable to initialize backend %s: no device (fake)\n' "'cuda'" | tee -a "$report"
+    exit 1
+  fi
+  printf '{"platform": "%s", "jax_backend": "%s", "device_kind": "%s", "devices": ["fake:0"], "packages": {}}\n' "$3" "$b" "$k" > "$out"
+  echo "   backend $b, 1 device(s), kind $k" | tee -a "$report"
+  exit 0
+fi
+case "${1:-}" in
+  *make_random_params.py)
+    out=$3; mkdir -p "$(dirname "$out")"; head -c 2048 /dev/urandom > "$out"
+    echo "schema:      $PWD/docs/model_parameters.md (405 tensors)"; echo "seed:        0"
+    echo "parameters:  368,384,538"; echo "wrote:       $out"; exit 0 ;;
+esac
+export FAKE_VENV="$0"
+exec "$FAKE_REAL_PY" "$@"

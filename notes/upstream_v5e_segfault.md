@@ -2,9 +2,42 @@
 
 Status: draft for jax-ml/jax, not filed. Lorenzo decides whether and where to file it
 (jax-ml/jax issues; possibly also google-deepmind/alphafold3 as a heads-up).
-Evidence: `results/af3/20261008T205351Z_v5e_bisect/` (bisection, commit `29f9a3b` of this
-repository) and `results/af3/20261008T165218Z_v6e_probe/` (v6e reference). All runs used
-random weights; no official AlphaFold3 weights are needed to reproduce.
+Evidence: `results/af3/20261008T205351Z_v5e_bisect/` (first bisection, commit `29f9a3b` of
+this repository), `results/af3/20261009T065048Z_v5e_bisect_samples/` (second bisection,
+commit `e8b4a6e`) and `results/af3/20261008T165218Z_v6e_probe/` (v6e reference). All runs
+used random weights; no official AlphaFold3 weights are needed to reproduce.
+
+### Update 2026-10-09 (second bisection), and whether to file
+
+- **Only 1 diffusion sample compiles** on v5e with libtpu 0.0.42.1: 2, 3, 4 and 5 samples
+  all segfault (7U3J, 10 recycles), so it is not a threshold or an odd/even pattern but any
+  sample batch larger than 1.
+- **The scoped VMEM limit has no effect**: `LIBTPU_INIT_ARGS=--xla_tpu_scoped_vmem_limit_kib=8192`
+  and `=32768` (default 16384) both still segfault with 5 samples.
+- **libtpu 0.0.43.2 fixes it**: jaxlib 0.10.2 with libtpu 0.0.43.2 (build label
+  `libtpu_lts_20260630_b_RC06`; 0.0.42.1 is `libtpu_lts_20260615_b_RC03`) compiles and runs
+  the 5-sample program on the same v5e (compile 32.9 s; 1 sample with 0.0.42.1: 30.3 s).
+  Each of its 5 samples matches the v6e 0.0.42.1 sample of the same index at 0.92 to 1.19 A
+  coordinate RMSD (random weights), the other pairings being 53 to 100 A apart. 0.0.43.2 is
+  outside the `libtpu==0.0.42.*` pin of `jax[tpu]==0.10.2`; its PyPI description only says
+  "libtpu supports JAX 0.7.1 or newer". We did not test 0.0.43 or 0.0.43.1, so the fixing
+  release is not narrowed down.
+- The newest stack (`jax[tpu]==0.11.2`, libtpu 0.0.48) could not be tested with AlphaFold3
+  v3.0.4: its pinned flax 0.12.2 fails at import (`AttributeError: jax.core.Effect was
+  deprecated in JAX v0.10.0 and removed in JAX v0.11.0`).
+- No public report or release note was found: JAX changelog 0.10.2 to 0.11.2, the libtpu
+  PyPI descriptions 0.0.42.1 to 0.0.43.2, and the Cloud TPU release notes (no entries after
+  2026-06-01) mention no TPU compiler segfault, VMEM or LLO fix.
+
+**Still worth filing?** Yes, but as a short, low-priority report rather than a bug hunt,
+because it appears fixed in a newer libtpu. What it would still give: (1) a record that
+`jax[tpu]==0.10.2` pins a libtpu with which a common model (AlphaFold3 at its default
+settings, whose `uv.lock` pins jax 0.10.2) segfaults at compile time on v5e, with no Python
+error, so that others find the workaround; (2) the questions only the maintainers can answer:
+is libtpu 0.0.43.x supported with jaxlib 0.10.2, which change fixed it, and could a compile
+failure surface as an error instead of a segfault. A heads-up on google-deepmind/alphafold3
+(v5e users need `libtpu==0.0.43.2` with the pinned jax) may help more people than the JAX
+issue. The report text below is updated with these results.
 
 ---
 
@@ -18,9 +51,10 @@ model when 5 diffusion samples are batched; the same program compiles on v6e
 Compiling AlphaFold3's inference function (`jit(apply_fn)`) on a single-chip TPU v5e kills the
 process with SIGSEGV during compilation. No Python exception and no XLA error status are
 raised. The crash depends only on the number of diffusion samples AlphaFold3 batches with
-`hk.vmap`: 1 sample compiles and runs; 5 samples (AlphaFold3's default) crash every time.
-The same jax, jaxlib and libtpu versions compile and run the 5-sample program on TPU v6e
-(Trillium).
+`hk.vmap`: 1 sample compiles and runs; 2, 3, 4 and 5 samples (5 is AlphaFold3's default)
+crash every time. The same jax, jaxlib and libtpu versions compile and run the 5-sample
+program on TPU v6e (Trillium). With jaxlib 0.10.2 and libtpu 0.0.43.2 instead of 0.0.42.1,
+the 5-sample program compiles and runs on the same v5e.
 
 ## Versions
 
@@ -90,8 +124,16 @@ bucket 256), with a 205-token protein-ligand complex (PDB 7U3J) and with a 1023-
 | 7U3J | 10 | 5 | harness, without our wrapper script | SIGSEGV |
 | 7U3J | 10 | 5 | harness, without `JAX_LOG_COMPILES` | SIGSEGV |
 | 7D5C, 1023 tokens | 10 | 1 | harness | pass |
+| 7U3J | 10 | 2 | harness | SIGSEGV |
+| 7U3J | 10 | 3 | harness | SIGSEGV |
+| 7U3J | 10 | 4 | harness | SIGSEGV |
+| 7U3J | 10 | 5 | harness, `LIBTPU_INIT_ARGS=--xla_tpu_scoped_vmem_limit_kib=8192` | SIGSEGV |
+| 7U3J | 10 | 5 | harness, `LIBTPU_INIT_ARGS=--xla_tpu_scoped_vmem_limit_kib=32768` | SIGSEGV |
+| 7U3J | 10 | 5 | harness, **libtpu 0.0.43.2** (jax/jaxlib 0.10.2) | **pass** |
+| 7U3J | 10 | 5 | harness, `jax[tpu]==0.11.2` (libtpu 0.0.48) | not testable: AlphaFold3's pinned flax fails to import with jax 0.11 |
 
-Samples 2, 3 and 4 have not been tried yet (planned).
+The last three rows ran in copies of the same venv with only those packages changed
+(`pip freeze` otherwise identical).
 
 ## What happens
 
@@ -168,5 +210,9 @@ VMEM or resource error) instead of a segfault.
 - The 5-sample program differs from the 1-sample one only by a leading batch dimension of 5
   on the diffusion head's tensors (AlphaFold3 `diffusion_head.sample`, `hk.vmap` over samples
   inside an `hk.scan` with `unroll=4`), for example `f32[5,6144,768]` and `f32[5,192,32,768]`.
-- libtpu 0.0.42.1 is the newest wheel allowed by `jax[tpu]==0.10.2`; we have not yet tried
-  newer stacks (jax 0.11.2 pins libtpu 0.0.48.*). [Fill in after the second bisection.]
+- libtpu 0.0.42.1 is the newest wheel allowed by `jax[tpu]==0.10.2` (`libtpu==0.0.42.*`).
+  libtpu 0.0.43.2 with jaxlib 0.10.2 fixes the crash (see the table); we found no statement
+  that this combination is supported, and did not test 0.0.43 or 0.0.43.1.
+- With libtpu 0.0.43.2 the 5 samples are the expected ones: AlphaFold3 draws them with JAX's
+  partitionable threefry, so each sample k matches sample k of the v6e run (0.92 to 1.19 A
+  RMSD with random weights) and not the others (53 to 100 A).
