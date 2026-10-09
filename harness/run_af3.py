@@ -25,7 +25,8 @@ Compile cache (--compile_cache):
               cloud/vm_v5e_bisect.py).
 
 Output: results/af3/<session>/ with session.json (configuration, machine,
-packages, device, weights and manifest hashes), runs.jsonl (one line per
+packages, device, on TPU the libtpu build (tpu_runtime), weights and manifest
+hashes), runs.jsonl (one line per
 target), and per target command.txt, run_alphafold.log, run.json and
 af3_output/. An existing session is never overwritten; results/ is gitignored.
 
@@ -76,6 +77,8 @@ import subprocess
 import sys
 import time
 import urllib.request
+
+from tpu_runtime import tpu_runtime
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 CONFIGS = REPO / 'harness' / 'configs.yaml'
@@ -417,6 +420,9 @@ def main():
                         'warm_dir': rel(warm_dir) if warm_dir else None,
                         'warm_at_start': dir_stats(warm_dir) if warm_dir else None},
       'host': host_info(), 'probe': env_probe,
+      # On TPU: the libtpu build the environment probe loaded (harness/tpu_runtime.py).
+      'tpu_runtime': (tpu_runtime(env_probe['packages'].get('libtpu'))
+                      if cfg['jax_backend'] == 'tpu' else None),
       'env_overrides': cfg.get('env', {}),
       'xla_env': {k: v for k, v in env.items() if k.startswith(('XLA_', 'JAX_', 'TF_'))},
       'repo': {'commit': git(REPO, 'rev-parse', 'HEAD'),

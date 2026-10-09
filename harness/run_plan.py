@@ -17,7 +17,21 @@ S, the rep 1 run of seed S keeps its compiled executables
 (--save_fresh_cache) and the rerun loads them (--compile_cache warm:...), so
 it can be compared with its source run. A failed run or target never stops the
 plan; every harness exit code goes to results/af3/<session>/plan_runs.jsonl.
-Exit status: 0 if every harness run exited 0, 1 otherwise.
+Exit status: 0 if every harness run exited 0, 1 otherwise, 5 if a libtpu
+switch failed.
+
+TPU stacks (optional plan key "libtpu", per platform, a list of libtpu
+versions; TPU platforms only): every run is repeated for each version, in the
+order given, and the run names carry it (tpu_xla_libtpu-0.0.43.2_rep1_seed1_fresh).
+Setup installs the first version (cloud/af3_run.sh passes it as
+LIBTPU_VERSION); before the first run of each version the plan makes sure it
+is the installed one, switching with cloud/vm_tpu_stack.sh --switch (jax and
+jaxlib unchanged). A failed switch stops the plan with exit status 5. Without
+the key, nothing is switched and run names are as before.
+
+compare_reference (optional, per platform): a harness run folder of an
+earlier session; cloud/af3_run.sh compares the fetched session with it
+(harness/compare_runs.py, bit for bit and by RMSD).
 
 --describe prints the expanded plan as JSON and runs nothing; cloud/af3_run.sh
 uses it on the laptop to choose uploads and to size the VM's lifetime.
@@ -32,6 +46,7 @@ import argparse
 import csv
 import datetime
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -93,17 +108,30 @@ def expand(plan_path, platform, manifest_path):
   if warm_seed is not None and warm_seed not in seeds:
     raise SystemExit(f'warm_rerun_seed {warm_seed} is not one of the seeds {seeds}')
 
+  libtpu = [v for v in as_list(per_platform(plan.get('libtpu', 'none'), platform)) if v != 'none']
+  for v in libtpu:
+    if not re.fullmatch(r'[0-9]+(\.[0-9]+)+', v):
+      raise SystemExit(f'plan: libtpu {v!r} is not a version like 0.0.43.2')
+  if libtpu and platform not in ('v5e', 'v6e'):
+    raise SystemExit(f'plan: libtpu versions are for TPU platforms, not {platform}')
+  if len(set(libtpu)) != len(libtpu):
+    raise SystemExit(f'plan: libtpu versions repeat: {libtpu}')
+
   runs = []
-  for config in configs:
-    for rep in range(1, reps + 1):
-      for seed in seeds:
-        runs.append({'run': f'{config}_rep{rep}_seed{seed}_fresh', 'config': config, 'rep': rep,
-                     'seed': seed, 'cache': 'fresh',
-                     'save_cache': warm_seed == seed and rep == 1})
-    if warm_seed is not None:
-      runs.append({'run': f'{config}_seed{warm_seed}_warm', 'config': config, 'rep': None,
-                   'seed': warm_seed, 'cache': 'warm', 'save_cache': False,
-                   'source_run': f'{config}_rep1_seed{warm_seed}_fresh'})
+  for version in libtpu or [None]:
+    tag = f'_libtpu-{version}' if version else ''
+    for config in configs:
+      name = f'{config}{tag}'
+      for rep in range(1, reps + 1):
+        for seed in seeds:
+          runs.append({'run': f'{name}_rep{rep}_seed{seed}_fresh', 'config': config, 'rep': rep,
+                       'seed': seed, 'cache': 'fresh', 'libtpu': version,
+                       'save_cache': warm_seed == seed and rep == 1})
+      if warm_seed is not None:
+        runs.append({'run': f'{name}_seed{warm_seed}_warm', 'config': config, 'rep': None,
+                     'seed': warm_seed, 'cache': 'warm', 'save_cache': False, 'libtpu': version,
+                     'source_run': f'{name}_rep1_seed{warm_seed}_fresh'})
+  reference = per_platform(plan.get('compare_reference', 'none'), platform)
   return {
       'plan': str(pathlib.Path(plan_path)), 'platform': platform,
       'description': plan.get('description', ''), 'label': plan.get('label', 'measurement'),
@@ -114,8 +142,31 @@ def expand(plan_path, platform, manifest_path):
       'num_diffusion_samples': optional_int(plan.get('num_diffusion_samples', 'default')),
       'run_timeout_min': float(plan.get('run_timeout_min', '180')),
       'deadline_min': int(per_platform(plan['deadline_min'], platform)),
+      'libtpu': libtpu, 'compare_reference': None if reference == 'none' else reference,
       'runs': runs, 'processes': len(runs) * len(targets),
   }
+
+
+AF3_PY = REPO / 'third_party' / 'alphafold3' / '.venv' / 'bin' / 'python'
+
+
+def installed_libtpu():
+  out = subprocess.run([str(AF3_PY), '-c', "import importlib.metadata as m; print(m.version('libtpu'))"],
+                       capture_output=True, text=True)
+  return out.stdout.strip() if out.returncode == 0 else None
+
+
+def ensure_libtpu(version):
+  """Makes libtpu VERSION the installed one (cloud/vm_tpu_stack.sh --switch); True on success."""
+  have = installed_libtpu()
+  if have == version:
+    print(f'>> libtpu {version} is installed', flush=True)
+    return True
+  print(f'>> switching libtpu {have} -> {version}', flush=True)
+  env = dict(os.environ, PY=str(AF3_PY), LIBTPU_VERSION=version,
+             PATH=f'{pathlib.Path.home() / ".local" / "bin"}:{os.environ.get("PATH", "")}')
+  rc = subprocess.run(['bash', str(REPO / 'cloud' / 'vm_tpu_stack.sh'), '--switch'], cwd=REPO, env=env).returncode
+  return rc == 0 and installed_libtpu() == version
 
 
 def main():
@@ -139,9 +190,20 @@ def main():
 
   log = REPO / 'results' / 'af3' / args.session / 'plan_runs.jsonl'
   log.parent.mkdir(parents=True, exist_ok=True)
-  failed = 0
+  failed, current = 0, None
   for i, run in enumerate(desc['runs'], 1):
-    cache_name = f'{args.session}_{run["config"]}'
+    if run.get('libtpu') and run['libtpu'] != current:
+      if not ensure_libtpu(run['libtpu']):
+        with open(log, 'a') as f:
+          f.write(json.dumps({'libtpu_switch': run['libtpu'], 'ok': False, 'installed': installed_libtpu(),
+                              'utc': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')})
+                  + '\n')
+        print(f'!! could not make libtpu {run["libtpu"]} the installed version; stopping the plan', flush=True)
+        if args.upload_uri:
+          upload(log.parent, args.upload_uri.rstrip('/'))
+        sys.exit(5)
+      current = run['libtpu']
+    cache_name = f'{args.session}_{run["run"].split("_rep")[0].split("_seed")[0]}'
     cmd = [sys.executable, str(REPO / 'harness' / 'run_af3.py'),
            '--config', run['config'], '--targets', ','.join(desc['targets']),
            '--seeds', str(run['seed']), '--session', f'{args.session}/{run["run"]}',

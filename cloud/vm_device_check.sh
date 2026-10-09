@@ -10,6 +10,9 @@
 # installed; jax/_src/xla_bridge.py, expand_platform_alias and backends()),
 # tpu. JAX still reports the default backend of a CUDA device as "gpu".
 #
+# On TPU it also adds setup.json's tpu_runtime block (libtpu version, build
+# label, build date) from libtpu's log of the check (harness/tpu_runtime.py).
+#
 # device_check.txt holds: the JAX_PLATFORMS used, the environment variables
 # that steer JAX and CUDA, nvidia-smi and /dev/nvidia* (L4), and on failure
 # the full Python traceback, JAX's per-backend initialisation errors and its
@@ -100,4 +103,8 @@ rc=$?
 if [ "$rc" -ne 0 ]; then
   echo "!! device check failed (exit $rc); details in device_check.txt" | tee -a "$REPORT"
   exit 5
+fi
+# On TPU, which libtpu build the check loaded (its own log); see harness/tpu_runtime.py.
+if [ "$BACKEND" = "tpu" ]; then
+  python3 "$ROOT/harness/tpu_runtime.py" --add_to "$OUT/setup.json" | tee -a "$REPORT"
 fi

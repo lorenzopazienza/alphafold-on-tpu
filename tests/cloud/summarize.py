@@ -28,6 +28,9 @@ EXPECTED = {
     'zones_v6e': 0, 'zones_refuse_v5e': 1, 'zones_refuse_bad': 1, 'l4_probe_cuda': 0, 'l4_devfail': 5,
     'l4_regress_setup': 5, 'l4_regress_config': 1, 'plan_samples': 0, 'plan_samples_venvfail': 0,
     'plan_refuse': 1, 'plan_prompt_no': 0, 'l4_prompt_no': 0,
+    'stack_v5e_default': 0, 'stack_v5e_0421': 1, 'stack_wrong': 5, 'stack_bad_version': 1,
+    'stack_ignored_l4': 0, 'stack_plan_v6e': 0, 'stack_plan_v5e': 0, 'stack_plan_conflict': 1,
+    'stack_switch_fail': 5, 'stack_bisect_default': 0, 'stack_prompt_v5e': 0, 'stack_prompt_v6e': 0,
 }
 rows, cur = [], None
 for line in open(sys.argv[1]).read().splitlines():

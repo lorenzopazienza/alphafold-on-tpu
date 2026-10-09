@@ -1,12 +1,35 @@
 #!/bin/bash
-# Fake uv for the bisection's venv copies: pip install / pip freeze only.
+# Fake uv: pip install / uninstall / freeze. Records, per venv (the --python
+# interpreter's venv folder), the libtpu and jaxlib versions it installs in
+# fake_libtpu / fake_jaxlib, which vm/python and vm/run_alphafold.py read.
+#   FAKE_UV_FAIL=TEXT        an install whose arguments contain TEXT fails
+#   FAKE_LIBTPU_WRONG=VER    a libtpu install puts VER instead of the requested one
 echo "uv $*" >> "${FAKE_LOG:-/dev/null}"
+py="" prev=""
+for a in "$@"; do [ "$prev" = "--python" ] && py="$a"; prev="$a"; done
+venv=""
+[ -n "$py" ] && venv=$(dirname "$(dirname "$py")")
 case "$1 $2" in
   "pip install")
     for a in "$@"; do
       case "$a" in *${FAKE_UV_FAIL:-@@none@@}*) echo "error: fake failure installing $a" >&2; exit 1 ;; esac
     done
+    for a in "$@"; do
+      case "$a" in
+        libtpu==*) v=${a#libtpu==}; [ -z "${FAKE_LIBTPU_WRONG:-}" ] || v=$FAKE_LIBTPU_WRONG
+                   [ -z "$venv" ] || echo "$v" > "$venv/fake_libtpu" ;;
+        jaxlib==*) [ -z "$venv" ] || echo "${a#jaxlib==}" > "$venv/fake_jaxlib" ;;
+        'jax[tpu]=='*) v=${a#'jax[tpu]=='}
+                   if [ -n "$venv" ]; then
+                     echo "$v" > "$venv/fake_jaxlib"
+                     case "$v" in 0.11.2) echo 0.0.48 ;; 0.10.2) echo 0.0.42.1 ;; *) echo 0.0.0 ;; esac > "$venv/fake_libtpu"
+                   fi ;;
+      esac
+    done
     echo "Installed (fake): ${*:3}" ;;
-  "pip freeze") echo "jax==fake"; echo "libtpu==fake" ;;
+  "pip uninstall") echo "Uninstalled (fake): ${*:3}" ;;
+  "pip freeze")
+    echo "jaxlib==$(cat "$venv/fake_jaxlib" 2> /dev/null || echo 0.10.2)"
+    [ ! -f "$venv/fake_libtpu" ] || echo "libtpu==$(cat "$venv/fake_libtpu")" ;;
   *) echo "uv 0.0.0 (fake)" ;;
 esac

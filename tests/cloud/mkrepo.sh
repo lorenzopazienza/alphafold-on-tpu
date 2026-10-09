@@ -2,8 +2,9 @@
 # Builds the scratch repository $WORK/repo the launchers run from: a copy of
 # the code under test (af3_tpu, cloud, harness, targets, inputs), three frozen
 # inputs, committed so the launchers can read a commit. Also copies the v6e
-# probe's 7U3J per-sample structures to $WORK/ref/7U3J when they exist on this
-# machine (the samples-plan test compares against them; skipped otherwise).
+# probe's 7U3J per-sample structures and confidences to $WORK/ref/7U3J when
+# they exist on this machine (the samples-plan and stack tests compare against
+# them; skipped otherwise).
 . "$(dirname "$0")/common.sh"
 set -e
 R=$WORK/repo
@@ -16,7 +17,7 @@ rm -rf "$WORK/ref"
 if [ -d "$REF" ]; then
   for d in "$REF"/seed-1_sample-*; do
     mkdir -p "$WORK/ref/7U3J/$(basename "$d")"
-    cp "$d"/*_model.cif "$WORK/ref/7U3J/$(basename "$d")/"
+    cp "$d"/*_model.cif "$d"/*confidences.json "$WORK/ref/7U3J/$(basename "$d")/"
   done
 fi
 cd "$R" && git init -q && git add -A && git -c user.name=test -c user.email=test@invalid commit -qm test

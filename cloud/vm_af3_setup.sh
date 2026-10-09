@@ -7,14 +7,16 @@
 #
 #   PLATFORM=cpu|l4|v5e|v6e WEIGHTS=random|gcs TARGETS=ID,ID bash cloud/vm_af3_setup.sh OUT
 #
-# JAX per platform: TPU swaps AlphaFold3's CUDA JAX for jax[tpu]==0.10.2 (as
-# the smoke tests do); L4 keeps AlphaFold3's pinned CUDA JAX and must show an
+# JAX per platform: TPU swaps AlphaFold3's CUDA JAX for jax/jaxlib 0.10.2 with
+# libtpu LIBTPU_VERSION (default 0.0.43.2; cloud/vm_tpu_stack.sh explains why
+# not the 0.0.42.* that jax[tpu]==0.10.2 pins); L4 keeps AlphaFold3's pinned CUDA JAX and must show an
 # L4; CPU keeps the default install (the cpu_xla config sets JAX_PLATFORMS=cpu).
 # The device check is cloud/vm_device_check.sh (JAX_PLATFORMS=cuda on L4; it
 # writes OUT/device_check.txt, which explains any failure).
-# Writes OUT/setup.json, OUT/pip_freeze.txt and OUT/weights.json. Exit 3 if
-# an input does not match the manifest, 4 for a weights problem, 5 if JAX does
-# not see the expected device.
+# Writes OUT/setup.json (on TPU with a tpu_runtime block: libtpu version,
+# build label and build date), OUT/pip_freeze.txt and OUT/weights.json. Exit 3
+# if an input does not match the manifest, 4 for a weights problem, 5 if JAX
+# does not see the expected device or the installed libtpu is not LIBTPU_VERSION.
 set -euo pipefail
 OUT=${1:?output folder}
 : "${PLATFORM:?}" "${WEIGHTS:?}" "${TARGETS:?}"
@@ -53,15 +55,8 @@ uv sync --frozen --python 3.12
 # swap. Call the venv's executables directly.
 case "$PLATFORM" in
   v5e | v6e)
-    step "swap CUDA JAX for jax[tpu]==0.10.2"
-    CUDA_PKGS=$(uv pip freeze --python "$PY" | grep -o '^jax-cuda12-[a-z0-9-]*' || true)
-    echo "removing: ${CUDA_PKGS:-none found}"
-    [ -z "$CUDA_PKGS" ] || uv pip uninstall --python "$PY" $CUDA_PKGS
-    uv pip install --python "$PY" "jax[tpu]==0.10.2" \
-      -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
-    if uv pip freeze --python "$PY" | grep '^jax-cuda12-'; then
-      echo "jax-cuda12 packages are still installed" >&2; exit 1
-    fi ;;
+    step "swap CUDA JAX for jax/jaxlib 0.10.2 with libtpu ${LIBTPU_VERSION:-0.0.43.2}"
+    PY="$PY" LIBTPU_VERSION="${LIBTPU_VERSION:-0.0.43.2}" bash "$ROOT/cloud/vm_tpu_stack.sh" ;;
   l4)
     step "NVIDIA driver (from the image); AlphaFold3's pinned CUDA JAX is kept"
     nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader ;;

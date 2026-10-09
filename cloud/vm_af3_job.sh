@@ -4,14 +4,18 @@
 # up (cloud/vm_af3_setup.sh), then runs the plan (harness/run_plan.py). OUT is
 # results/af3/<session> inside the checkout; everything in it is fetched.
 #
-#   PLATFORM= PLAN= WEIGHTS= TARGETS= SESSION= [RESULTS_URI=] bash cloud/vm_af3_job.sh OUT
+#   PLATFORM= PLAN= WEIGHTS= TARGETS= SESSION= [RESULTS_URI=] [LIBTPU_VERSION=] bash cloud/vm_af3_job.sh OUT
+#
+# LIBTPU_VERSION (TPU): the libtpu setup installs (cloud/vm_tpu_stack.sh);
+# a plan with several libtpu versions switches between them itself.
 #
 # RESULTS_URI (optional): gs:// folder in the results bucket for this session.
 # The plan uploads each target's folder there as soon as it finishes; this
 # script uploads OUT once more at the end, also after a failed setup.
 #
-# Exit status: setup's (3 inputs, 4 weights, 5 device, other: install), or
-# the plan's (0 all runs exited 0, 1 some failed and were recorded).
+# Exit status: setup's (3 inputs, 4 weights, 5 device or TPU stack, other:
+# install), or the plan's (0 all runs exited 0, 1 some failed and were
+# recorded, 5 a libtpu switch failed).
 set -uo pipefail
 OUT=${1:?output folder}
 : "${PLATFORM:?}" "${PLAN:?}" "${WEIGHTS:?}" "${TARGETS:?}" "${SESSION:?}"

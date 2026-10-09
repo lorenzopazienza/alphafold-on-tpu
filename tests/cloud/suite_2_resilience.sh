@@ -1,7 +1,8 @@
 #!/bin/bash
 # Suite 2 (first written 2026-10-08): preemption, results bucket, FETCH
 # light/full, L4 Flex-start, price by region, provisioning refusals, and the
-# v5e bisection (V0 to V9) on a fake VM.
+# v5e bisection (V0 to V9) on a fake VM, with LIBTPU_VERSION=0.0.42.1 (the
+# stack that segfaults; the fake reproduces that).
 . "$(dirname "$0")/common.sh"
 R="$KIT/run.sh"
 B=gs://af3-results-test/runs
@@ -36,10 +37,10 @@ for pv in v5e:flex_start cpu:flex_start v6e:spot l4:preemptible; do
 done
 bash "$R" refuse_valid_for ok PLATFORM=l4 PROVISIONING=flex_start REQUEST_VALID_FOR=3h
 echo "======== v5e bisection (V0 to V9) on a fake VM"
-bash "$R" bisect bisect SCRIPT=cloud/v5e_bisect.sh FAKE_PLATFORM=v5e BISECT_TPU_LOG_DIR=$WORK/state_bisect/tpu_logs \
+bash "$R" bisect bisect SCRIPT=cloud/v5e_bisect.sh LIBTPU_VERSION=0.0.42.1 FAKE_PLATFORM=v5e BISECT_TPU_LOG_DIR=$WORK/state_bisect/tpu_logs \
   BISECT_DUMP_MAX_MB=0.05 FAKE_DUMP_BYTES=20000
 grep -E '^   (id|V[0-9]|reading)' "$WORK/state_bisect/out"
-bash "$R" bisect_budget bisect SCRIPT=cloud/v5e_bisect.sh FAKE_PLATFORM=v5e BISECT_TPU_LOG_DIR=$WORK/state_bisect_budget/tpu_logs \
+bash "$R" bisect_budget bisect SCRIPT=cloud/v5e_bisect.sh LIBTPU_VERSION=0.0.42.1 FAKE_PLATFORM=v5e BISECT_TPU_LOG_DIR=$WORK/state_bisect_budget/tpu_logs \
   BISECT_BUDGET_MIN=1 DETACHED_DEADLINE_MIN=20 BISECT_MIN_START_S=57
-bash "$R" bisect_preempt preempt SCRIPT=cloud/v5e_bisect.sh FAKE_PLATFORM=v5e FAKE_RUN_S=5 BISECT_TPU_LOG_DIR=$WORK/state_bisect_preempt/tpu_logs; polls bisect_preempt
+bash "$R" bisect_preempt preempt SCRIPT=cloud/v5e_bisect.sh LIBTPU_VERSION=0.0.42.1 FAKE_PLATFORM=v5e FAKE_RUN_S=5 BISECT_TPU_LOG_DIR=$WORK/state_bisect_preempt/tpu_logs; polls bisect_preempt
 bash "$R" bisect_refuse ok SCRIPT=cloud/v5e_bisect.sh BISECT_BUDGET_MIN=95

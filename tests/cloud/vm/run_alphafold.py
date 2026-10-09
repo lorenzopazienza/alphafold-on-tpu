@@ -6,11 +6,12 @@ Writes AlphaFold3's output layout: per target <name>_data.json and the full
 and per sample folder the same three per-sample files. With FAKE_REF_DIR
 (an AlphaFold3 output folder), per-sample mmCIFs are copied from its
 seed-S_sample-K folders, so harness/compare_samples.py has real structures.
-FAKE_SCENARIO=bisect: on TPU, crash with SIGSEGV when num_diffusion_samples > 1,
-unless LIBTPU_INIT_ARGS sets scoped_vmem_limit_kib=32768 or the venv is
-.venv_jax0112 (simulated fixes, so readings see both outcomes); write fake
-libtpu logs to $BISECT_TPU_LOG_DIR and fake HLO dumps where XLA_FLAGS
---xla_dump_to points.
+As found on v5e (2026-10-08/09): on v5e (v6e is fine), num_diffusion_samples > 1
+crashes with SIGSEGV when the venv's libtpu (fake_libtpu, written by bin/uv; missing means
+0.0.42.1) is 0.0.42.1, whatever LIBTPU_INIT_ARGS says; a venv with jaxlib
+0.11.2 fails at import like AlphaFold3's pinned flax does.
+FAKE_SCENARIO=bisect: also writes fake libtpu logs to $BISECT_TPU_LOG_DIR and
+fake HLO dumps where XLA_FLAGS --xla_dump_to points.
 """
 import glob, json, os, shutil, signal, sys, time
 from absl import app, flags
@@ -26,8 +27,20 @@ _RECYCLES = flags.DEFINE_integer('num_recycles', 10, '')
 _SAMPLES = flags.DEFINE_integer('num_diffusion_samples', 5, '')
 
 
+def venv_file(name, default):
+  venv = os.path.dirname(os.path.dirname(os.environ.get('FAKE_VENV', '')))
+  try:
+    return open(os.path.join(venv, name)).read().strip()
+  except OSError:
+    return default
+
+
 def main(_):
   sc = os.environ.get('FAKE_SCENARIO', '')
+  if venv_file('fake_jaxlib', '0.10.2') == '0.11.2':
+    print('AttributeError: jax.core.Effect  was deprecated in JAX v0.10.0 and removed in JAX v0.11.0. '
+          'Use jax.extend.core.Effect.', flush=True)
+    sys.exit(1)
   data = json.load(open(_JSON_PATH.value)); name = data['name']; seeds = data['modelSeeds']
   assert os.listdir(_MODEL_DIR.value), 'no weights'
   print(f'Found local {_JAX_BACKEND.value.upper()} devices: [FakeDevice(id=0)], using device 0: fake:0', flush=True)
@@ -56,11 +69,10 @@ def main(_):
             f.write(os.urandom(size))
           time.sleep(0.01)
     print('Finished jaxpr to MLIR module conversion jit(apply_fn) in 0.8 sec', flush=True)
-    fixed = ('scoped_vmem_limit_kib=32768' in os.environ.get('LIBTPU_INIT_ARGS', '')
-             or '.venv_jax0112' in os.environ.get('FAKE_VENV', ''))
-    if _JAX_BACKEND.value == 'tpu' and _SAMPLES.value > 1 and not fixed:
-      print('Fatal Python error: Segmentation fault', flush=True)
-      os.kill(os.getpid(), signal.SIGSEGV)
+  if (os.environ.get('FAKE_PLATFORM') == 'v5e' and _SAMPLES.value > 1
+      and venv_file('fake_libtpu', '0.0.42.1') == '0.0.42.1'):
+    print('Fatal Python error: Segmentation fault', flush=True)
+    os.kill(os.getpid(), signal.SIGSEGV)
   time.sleep(float(os.environ.get('FAKE_RUN_S', '0.5')))
   if sc == 'hang':
     time.sleep(600)
@@ -82,7 +94,7 @@ def main(_):
     print(f'Extracting {_SAMPLES.value} inference samples with seed {s} took 0.20 seconds.', flush=True)
   print(f'Running model inference and extracting output structures with {len(seeds)} seed(s) took 70.70 seconds.', flush=True)
   out = os.path.join(_OUTPUT_DIR.value, name); os.makedirs(out, exist_ok=True)
-  big = 'x' * 50000
+  big = json.dumps({'atom_plddts': [0.5] * 5000, 'pae': [[1.0] * 50] * 50})
   files = {f'{name}_model.cif': 'fake', f'{name}_summary_confidences.json': '{}',
            f'{name}_ranking_scores.csv': 'seed,sample,ranking_score\n', f'{name}_data.json': big,
            f'{name}_confidences.json': big, 'TERMS_OF_USE.md': 'terms'}

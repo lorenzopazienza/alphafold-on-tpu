@@ -57,6 +57,16 @@
 # state; a preempted, stopped or deleted VM ends the run at once and goes
 # straight to cleanup (bucket fetch if configured, delete, leftover check).
 #
+# TPU stack (v5e, v6e): jax/jaxlib 0.10.2 with libtpu LIBTPU_VERSION (default
+# 0.0.43.2; LIBTPU_VERSION=0.0.42.1 for the version jax[tpu]==0.10.2 pins;
+# cloud/vm_tpu_stack.sh explains the choice). A plan with a "libtpu" list sets
+# it instead (its first version; the others follow on the same VM); a
+# LIBTPU_VERSION that disagrees with that list is refused. Ignored on cpu and l4.
+#
+# Comparison: if the plan names a compare_reference and that folder exists on
+# the laptop, the fetched session is compared with it at the end, bit for bit
+# and by RMSD (harness/compare_runs.py; compare_runs.txt in the session).
+#
 # Price: the worst case uses cloud/prices.csv for the zone's region; if the
 # region (or machine type) has no row there, it says which list price it shows
 # instead. Without a published price for the provisioning model (G2
@@ -192,6 +202,27 @@ case "$WEIGHTS" in
 esac
 [ "$WEIGHTS" = "$PLAN_WEIGHTS" ] || echo "   note: the plan asks for weights=$PLAN_WEIGHTS; running with WEIGHTS=$WEIGHTS"
 
+# TPU stack: libtpu version(s) and the comparison reference from the plan.
+PLAN_LIBTPU=$(jget "['libtpu']" | python3 -c "import ast,sys; print(' '.join(ast.literal_eval(sys.stdin.read())))")
+COMPARE_REF=$(jget "['compare_reference']")
+[ "$COMPARE_REF" != "None" ] || COMPARE_REF=""
+case "$PLATFORM" in
+  v5e | v6e)
+    if [ -n "$PLAN_LIBTPU" ]; then
+      set -- $PLAN_LIBTPU
+      [ -z "${LIBTPU_VERSION:-}" ] || [ "$LIBTPU_VERSION" = "$1" ] \
+        || die "LIBTPU_VERSION=$LIBTPU_VERSION disagrees with the plan's libtpu list ($PLAN_LIBTPU); unset it."
+      LIBTPU_VERSION=$1
+    else
+      LIBTPU_VERSION="${LIBTPU_VERSION:-0.0.43.2}"
+    fi
+    echo "$LIBTPU_VERSION" | grep -Eq '^[0-9]+(\.[0-9]+)+$' || die "LIBTPU_VERSION must be a version like 0.0.43.2."
+    ;;
+  *)
+    [ -z "${LIBTPU_VERSION:-}" ] || echo "   note: LIBTPU_VERSION is for TPU platforms; ignored on $PLATFORM"
+    LIBTPU_VERSION="" ;;
+esac
+
 # Results bucket and fetch mode.
 RESULTS_GCS_URI="${RESULTS_GCS_URI:-}"
 FETCH="${FETCH:-light}"
@@ -319,6 +350,17 @@ else
 fi
 [ "$VM_API" = "tpu" ] || echo "   image $IMAGE_PROJECT/$IMAGE_FAMILY${MIN_CPU_PLATFORM:+, min CPU platform $MIN_CPU_PLATFORM}"
 if [ "$WEIGHTS" = "gcs" ]; then echo "   weights: gcs (copied on the VM from your bucket; URI not printed)"; else echo "   weights: random (generated on the VM)"; fi
+if [ -n "$LIBTPU_VERSION" ]; then
+  STACK_NOTE=""
+  [ "$LIBTPU_VERSION" = "0.0.42.1" ] || STACK_NOTE=" (outside the 0.0.42.* that jax[tpu]==0.10.2 pins)"
+  echo "   TPU stack: jax/jaxlib 0.10.2 with libtpu $LIBTPU_VERSION$STACK_NOTE"
+  N_LIBTPU=$(echo $PLAN_LIBTPU | wc -w | tr -d ' ')
+  [ "$N_LIBTPU" -le 1 ] || echo "     then on the same VM, in order: $(echo $PLAN_LIBTPU | cut -d' ' -f2-)"
+fi
+if [ -n "$COMPARE_REF" ]; then
+  if [ -d "$COMPARE_REF" ]; then echo "   compared at the end with: $COMPARE_REF"
+  else echo "   compare_reference $COMPARE_REF is not on this machine: no comparison at the end"; fi
+fi
 echo "   follow deadline: $DETACHED_DEADLINE_MIN min"
 if [ "$VM_API" = "tpu" ]; then
   echo "   VM lifetime limit: watchdog deletes it after $WATCHDOG_HOURS h"
@@ -357,6 +399,11 @@ cleanup() {
   if [ "$CREATE_ISSUED" = "1" ]; then
     if [ "$STARTED" = "1" ]; then
       results_fetch "$OUT_REL" results/af3 "$FETCH_EFFECTIVE" "$RESULTS_SESSION_URI"
+      if [ -n "$COMPARE_REF" ] && [ -d "$COMPARE_REF" ] && [ -d "results/af3/$SESSION" ]; then
+        echo ">> Comparing with $COMPARE_REF (results/af3/$SESSION/compare_runs.txt)"
+        python3 harness/compare_runs.py --session "results/af3/$SESSION" --reference "$COMPARE_REF" | sed 's/^/   /'
+        [ "$FETCH_EFFECTIVE" = "full" ] || echo "   (FETCH=light: the full confidences stayed in the bucket and show as missing)"
+      fi
     fi
     echo ">> Deleting $VM_NAME"
     if ! vm_delete && [ "$VM_API" = "gce" ]; then
@@ -446,7 +493,7 @@ vm_wait_ssh || exit 1
 
 echo ">> Uploading the plan's files (commit $BENCH_COMMIT)"
 TGZ=$(mktemp -t af3-run.XXXXXX)
-FILES="af3_tpu harness targets inputs/manifest.csv cloud/vm_af3_setup.sh cloud/vm_af3_weights.sh cloud/vm_device_check.sh cloud/vm_af3_job.sh"
+FILES="af3_tpu harness targets inputs/manifest.csv cloud/vm_af3_setup.sh cloud/vm_af3_weights.sh cloud/vm_device_check.sh cloud/vm_tpu_stack.sh cloud/vm_af3_job.sh"
 for t in $(echo "$TARGETS" | tr ',' ' '); do FILES="$FILES data/inputs/$t.json"; done
 tar czf "$TGZ" --exclude=__pycache__ $FILES
 vm_upload "$TGZ" af3_run.tgz
@@ -466,15 +513,15 @@ DETACHED_SCRIPT=cloud/vm_af3_job.sh
 DETACHED_LOG=job.log
 STARTED=1
 detached_start "$OUT_REL" \
-  "PLATFORM=$PLATFORM PLAN=$PLAN WEIGHTS=$WEIGHTS TARGETS=$TARGETS SESSION=$SESSION RESULTS_URI=$RESULTS_SESSION_URI" \
+  "PLATFORM=$PLATFORM PLAN=$PLAN WEIGHTS=$WEIGHTS TARGETS=$TARGETS SESSION=$SESSION RESULTS_URI=$RESULTS_SESSION_URI LIBTPU_VERSION=$LIBTPU_VERSION" \
   || die "Could not start the job on the VM."
 if ! detached_wait "$OUT_REL"; then
   [ "$DETACHED_VM_GONE" != "1" ] || die "$VM_NAME was preempted or deleted during the run; cleaning up."
   die "No result from the job."
 fi
 if [ "$DETACHED_RC" != "0" ]; then
-  echo "!! The job exited with $DETACHED_RC (setup: 3 inputs, 4 weights, 5 device;" \
-       "plan: 1 some runs failed, all recorded); results are fetched below"
+  echo "!! The job exited with $DETACHED_RC (setup: 3 inputs, 4 weights, 5 device or TPU stack;" \
+       "plan: 1 some runs failed, all recorded, 5 a libtpu switch failed); results are fetched below"
   exit "$DETACHED_RC"
 fi
 echo ">> Plan finished: every harness run exited 0"

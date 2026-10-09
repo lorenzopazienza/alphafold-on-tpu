@@ -18,7 +18,8 @@
 # the fetched per-sample structures are compared with it at the end
 # (harness/compare_samples.py; prefix_compare.txt in the session).
 #
-# Overrides: PROJECT ZONE (europe-west4-b) RUNTIME (v2-alpha-tpuv5-lite, as in
+# Overrides: LIBTPU_VERSION (0.0.43.2; 0.0.42.1 reproduces the v5e segfault)
+# PROJECT ZONE (europe-west4-b) RUNTIME (v2-alpha-tpuv5-lite, as in
 # the probe and the smoke test) SPOT (0) BISECT_BUDGET_MIN (80: VM-side time
 # for setup and variants; later variants are skipped once it runs out)
 # VARIANT_TIMEOUT_MIN (15) DETACHED_DEADLINE_MIN (100: how long the laptop
@@ -52,6 +53,10 @@ VARIANT_TIMEOUT_MIN="${VARIANT_TIMEOUT_MIN:-15}"
 DETACHED_DEADLINE_MIN="${DETACHED_DEADLINE_MIN:-100}"
 RESULTS_GCS_URI="${RESULTS_GCS_URI:-}"
 BISECT_PLAN="${BISECT_PLAN:-}"
+# The TPU stack setup installs (cloud/vm_tpu_stack.sh): 0.0.43.2 by default;
+# LIBTPU_VERSION=0.0.42.1 reproduces the segfault the first bisections found.
+LIBTPU_VERSION="${LIBTPU_VERSION:-0.0.43.2}"
+echo "$LIBTPU_VERSION" | grep -Eq '^[0-9]+(\.[0-9]+)+$' || die "LIBTPU_VERSION must be a version like 0.0.43.2."
 if [ "$SPOT" = "1" ]; then PROVISIONING=spot; else PROVISIONING=standard; fi
 
 for n in BISECT_BUDGET_MIN VARIANT_TIMEOUT_MIN DETACHED_DEADLINE_MIN; do
@@ -118,6 +123,7 @@ TYPICAL=$(python3 -c "print(f'{$PRICE * 40 / 60:.2f} to \${$PRICE * 1.5:.2f}')")
 
 echo
 echo ">> v5e bisection: one $MACHINE_TYPE ($RUNTIME) in $ZONE, $PROVISIONING"
+echo "   TPU stack: jax/jaxlib 0.10.2 with libtpu $LIBTPU_VERSION (LIBTPU_VERSION=0.0.42.1 reproduces the v5e segfault)"
 echo "   variants, in order (each AlphaFold3 run in a fresh process, ${VARIANT_TIMEOUT_MIN} min timeout):"
 [ -z "$BISECT_PLAN" ] || echo "   plan: $BISECT_PLAN"
 python3 cloud/vm_v5e_bisect.py --list ${BISECT_PLAN:+--plan "$BISECT_PLAN"} | sed 's/^/     /'
@@ -213,7 +219,7 @@ vm_wait_ssh || exit 1
 echo ">> Uploading the bisection's files (commit $BENCH_COMMIT)"
 TGZ=$(mktemp -t af3-bisect.XXXXXX)
 tar czf "$TGZ" --exclude=__pycache__ af3_tpu harness targets inputs/manifest.csv \
-  cloud/vm_af3_setup.sh cloud/vm_af3_weights.sh cloud/vm_device_check.sh cloud/vm_v5e_bisect.sh cloud/vm_v5e_bisect.py \
+  cloud/vm_af3_setup.sh cloud/vm_af3_weights.sh cloud/vm_device_check.sh cloud/vm_tpu_stack.sh cloud/vm_v5e_bisect.sh cloud/vm_v5e_bisect.py \
   ${BISECT_PLAN:+"$BISECT_PLAN"} \
   data/inputs/7U3J.json data/inputs/7D5C.json
 vm_upload "$TGZ" af3_bisect.tgz
@@ -225,7 +231,7 @@ DETACHED_SCRIPT=cloud/vm_v5e_bisect.sh
 DETACHED_LOG=bisect.log
 STARTED=1
 detached_start "$OUT_REL" \
-  "SESSION=$SESSION BISECT_BUDGET_MIN=$BISECT_BUDGET_MIN VARIANT_TIMEOUT_MIN=$VARIANT_TIMEOUT_MIN RESULTS_URI=$RESULTS_SESSION_URI BISECT_PLAN=$BISECT_PLAN" \
+  "SESSION=$SESSION BISECT_BUDGET_MIN=$BISECT_BUDGET_MIN VARIANT_TIMEOUT_MIN=$VARIANT_TIMEOUT_MIN RESULTS_URI=$RESULTS_SESSION_URI BISECT_PLAN=$BISECT_PLAN LIBTPU_VERSION=$LIBTPU_VERSION" \
   || die "Could not start the bisection on the VM."
 if ! detached_wait "$OUT_REL"; then
   [ "$DETACHED_VM_GONE" != "1" ] || die "$VM_NAME was preempted or deleted during the bisection; cleaning up."

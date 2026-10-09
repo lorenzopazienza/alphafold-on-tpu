@@ -50,12 +50,12 @@ plan_ref() {
   mkdir -p "$refdir" && cp -R "$WORK/ref/7U3J" "$refdir/"
 }
 plan_ref
-bash "$R" plan_samples bisect SCRIPT=cloud/v5e_bisect.sh BISECT_PLAN=cloud/plans/v5e_bisect_samples.json FAKE_PLATFORM=v5e \
+bash "$R" plan_samples bisect SCRIPT=cloud/v5e_bisect.sh BISECT_PLAN=cloud/plans/v5e_bisect_samples.json LIBTPU_VERSION=0.0.42.1 FAKE_PLATFORM=v5e \
   BISECT_TPU_LOG_DIR=$WORK/state_plan_samples/tpu_logs FAKE_REF_DIR=$WORK/ref/7U3J
 sed -n '/Sample-prefix comparison/,/Bisection summary/p' "$WORK/state_plan_samples/out" | head -16
 grep -E '^   (id|S[0-9]|reading)' "$WORK/state_plan_samples/out"
 plan_ref
-bash "$R" plan_samples_venvfail bisect SCRIPT=cloud/v5e_bisect.sh BISECT_PLAN=cloud/plans/v5e_bisect_samples.json FAKE_PLATFORM=v5e \
+bash "$R" plan_samples_venvfail bisect SCRIPT=cloud/v5e_bisect.sh BISECT_PLAN=cloud/plans/v5e_bisect_samples.json LIBTPU_VERSION=0.0.42.1 FAKE_PLATFORM=v5e \
   BISECT_TPU_LOG_DIR=$WORK/state_plan_samples_venvfail/tpu_logs FAKE_UV_FAIL=libtpu==0.0.43.2
 grep -E "^   S5l" "$WORK/state_plan_samples_venvfail/out"
 bash "$R" plan_refuse ok SCRIPT=cloud/v5e_bisect.sh BISECT_PLAN=cloud/plans/missing.json

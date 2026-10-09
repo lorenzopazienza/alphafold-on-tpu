@@ -39,7 +39,7 @@ fake_env() {
   env $FAKE_UNSET CLOUDSDK_CONFIG="$d/cloudsdk" CLOUDSDK_CORE_PROJECT=fake-project-no-access \
     PATH="$KIT/bin:$PATH" FAKE_LOG="$d/log" FAKE_DIR="$d" FAKE_HOME="$d/home" FAKE_KIT="$KIT" \
     FAKE_REAL_PY="$REPO/third_party/alphafold3/.venv/bin/python" DETACHED_POLL_S=1 VM_POLL_S=0 \
-    VM_OP_WAIT_S=5 VM_CLEAR_SLEEP_S=0 "$@"
+    VM_OP_WAIT_S=5 VM_CLEAR_SLEEP_S=0 AF3_TPU_LOG_DIR="$d/libtpu_logs" "$@"
 }
 
 # Variables a test run must not inherit from the caller's shell.

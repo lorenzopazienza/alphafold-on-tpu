@@ -1,17 +1,42 @@
 #!/bin/bash
 # Fake AlphaFold3 venv python. Records JAX_PLATFORMS on every call and, like
 # JAX 0.10.2, fails if it names "gpu" (expands to cuda, rocm, oneapi) or "rocm"
-# on a machine without ROCm. "-" (stdin script) is the device check: real
-# python for FAKE_PLATFORM=cpu, emulated otherwise.
-echo "$(basename "$(dirname "$(dirname "$0")")") ${1:-} JAX_PLATFORMS=${JAX_PLATFORMS-<unset>}" >> "$FAKE_DIR/jax_platforms.log"
+# on a machine without ROCm. Answers importlib.metadata version queries for
+# libtpu and jaxlib from this venv's fake_libtpu / fake_jaxlib (bin/uv writes
+# them). "-" (stdin script) is the device check: real python for
+# FAKE_PLATFORM=cpu, emulated otherwise. On TPU, the probe and the device
+# check write a libtpu log to AF3_TPU_LOG_DIR with the build label of the
+# installed libtpu (the real labels for 0.0.42.1 and 0.0.43.2).
+VENV=$(cd "$(dirname "$0")/.." && pwd)
+echo "$(basename "$VENV") ${1:-} JAX_PLATFORMS=${JAX_PLATFORMS-<unset>}" >> "$FAKE_DIR/jax_platforms.log"
 case "${JAX_PLATFORMS:-}" in
   *gpu* | *rocm*)
     echo "RuntimeError: Unable to initialize backend 'rocm': Backend 'rocm' is not in the list of known backends: ['cpu', 'tpu', 'cuda']. (set JAX_PLATFORMS='' to automatically choose an available backend)" >&2
     exit 1 ;;
 esac
 case "$FAKE_PLATFORM" in cpu) b=cpu k=cpu ;; l4) b=gpu k="NVIDIA L4" ;; v5e) b=tpu k="TPU v5 lite" ;; v6e) b=tpu k="TPU v6 lite" ;; esac
+libtpu=$(cat "$VENV/fake_libtpu" 2> /dev/null || true)
+fake_tpu_log() {
+  [ "$b" = tpu ] && [ -n "${AF3_TPU_LOG_DIR:-}" ] || return 0
+  local l d e f
+  case "$libtpu" in
+    0.0.42.1) l=libtpu_lts_20260615_b_RC03 d="Jun 17 2026 11:08:48" e=1781719728 ;;
+    0.0.43.2) l=libtpu_lts_20260630_b_RC06 d="Aug 24 2026 14:55:32" e=1787608532 ;;
+    *) l="libtpu_fake_${libtpu:-none}" d="Jan 1 2026 00:00:00" e=1767225600 ;;
+  esac
+  mkdir -p "$AF3_TPU_LOG_DIR"
+  f="$AF3_TPU_LOG_DIR/tpu_driver.fakehost.fakeuser.log.INFO.$(date +%Y%m%d-%H%M%S).$$"
+  printf 'Binary: Built on %s (%s)\nI1009 00:00:00.000000 1 b295d63588a.cc:884] Built on %s (%s)\nI1009 00:00:00.000001 1 b295d63588a.cc:894] Build label: %s\n' \
+    "$d" "$e" "$d" "$e" "$l" > "$f"
+}
 if [ "${1:-}" = "-c" ]; then
-  echo "{\"python\": \"3.12.6\", \"packages\": {\"jax\": \"0.10.2\", \"jaxlib\": \"0.10.2\"}, \"default_backend\": \"$b\", \"devices\": [\"fake:0\"], \"device_kind\": \"$k\"}"
+  case "$2" in
+    *"version('libtpu')"*) [ -n "$libtpu" ] && { echo "$libtpu"; exit 0; }; exit 1 ;;
+    *"version('jaxlib')"*) cat "$VENV/fake_jaxlib" 2> /dev/null || echo 0.10.2; exit 0 ;;
+  esac
+  fake_tpu_log
+  lt=null; [ -z "$libtpu" ] || lt="\"$libtpu\""
+  echo "{\"python\": \"3.12.6\", \"packages\": {\"jax\": \"0.10.2\", \"jaxlib\": \"$(cat "$VENV/fake_jaxlib" 2> /dev/null || echo 0.10.2)\", \"libtpu\": $lt}, \"default_backend\": \"$b\", \"devices\": [\"fake:0\"], \"device_kind\": \"$k\"}"
   exit 0
 fi
 if [ "${1:-}" = "-" ] && [ "$FAKE_PLATFORM" != "cpu" ]; then
@@ -21,7 +46,9 @@ if [ "${1:-}" = "-" ] && [ "$FAKE_PLATFORM" != "cpu" ]; then
     printf '## jax.devices() failed:\nTraceback (most recent call last):\nRuntimeError: Unable to initialize backend %s: no device (fake)\n' "'cuda'" | tee -a "$report"
     exit 1
   fi
-  printf '{"platform": "%s", "jax_backend": "%s", "device_kind": "%s", "devices": ["fake:0"], "packages": {}}\n' "$3" "$b" "$k" > "$out"
+  fake_tpu_log
+  lt=null; [ -z "$libtpu" ] || lt="\"$libtpu\""
+  printf '{"platform": "%s", "jax_backend": "%s", "device_kind": "%s", "devices": ["fake:0"], "packages": {"libtpu": %s}}\n' "$3" "$b" "$k" "$lt" > "$out"
   echo "   backend $b, 1 device(s), kind $k" | tee -a "$report"
   exit 0
 fi
