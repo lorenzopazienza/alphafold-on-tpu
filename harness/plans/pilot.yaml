@@ -1,11 +1,29 @@
-# Pilot: does hardware change AlphaFold3's outputs more than recompilation
-# does? The 10 pilot targets (inputs/manifest.csv, pilot = yes), seeds 1 and 2,
-# two fresh-cache repetitions each, and one warm-cache rerun of seed 1 that
-# reuses the executables compiled by its source run (rep 1, seed 1) and is
-# expected to be bit-identical to it. Official weights from Lorenzo's private
-# bucket (WEIGHTS=gcs). CPU runs only the pilot targets at or under 512 tokens.
+# Pilot (notes/analysis_plan.md, section 6): does hardware change AlphaFold3's
+# outputs more than recompilation does? Official weights from Lorenzo's
+# private bucket (WEIGHTS=gcs), AlphaFold3's defaults (10 recycles, 5
+# diffusion samples, xla attention), libtpu 0.0.43.2 on TPU (the launcher's
+# default stack).
 #
-# Per platform: 5 harness runs x the targets, each target a fresh process.
+#   V5 (v5e), V6 (v6e), G (l4): the 10 pilot targets (inputs/manifest.csv,
+#     pilot = yes), seeds 1 and 2, two fresh-cache repetitions (r1, r2) and a
+#     warm-cache rerun (w) of seed 1 that reuses the executables compiled by
+#     r1 seed 1 and is expected to be bit-identical to it: 5 harness runs x
+#     10 targets = 50 processes, each target a fresh process.
+#   C (cpu): the 6 pilot targets of 512 tokens or fewer, seeds 1 and 2, r1
+#     only: 2 runs x 6 targets = 12 processes.
+#   No GT (L4 with triton attention) in the pilot.
+#
+# Launch (sizing from the random-weight runs of 2026-10-08/09, same compute):
+#   v5e, v6e: this plan, one VM each (about 2.7 h and 2.3 h).
+#   l4, cpu: one VM would take about 6 h (l4) and 12 h (cpu), so they run as
+#     parallel VMs on the split plans pilot_l4_1/2.yaml and pilot_cpu_1..4.yaml,
+#     which together cover exactly this plan for that platform (checked by
+#     analysis/tests/test_pilot_plan.py). Their deadline here is 0, which
+#     cloud/af3_run.sh refuses, so this file cannot start a 6 h or 12 h VM.
+# Deadline: 2 x setup + 1.4 x the expected run time, rounded up to 15 min;
+# the VM lifetime is the deadline + 30 min (cloud/af3_run.sh).
+#
+# Format: the YAML subset of harness/configs.yaml, plus inline lists [a, b].
 
 description: pilot with the official weights (hardware versus recompilation variability)
 label: pilot
@@ -25,13 +43,18 @@ max_tokens:
   default: none
 
 seeds: [1, 2]
-fresh_reps: 2
-warm_rerun_seed: 1
+fresh_reps:
+  cpu: 1
+  default: 2
+warm_rerun_seed:
+  cpu: none
+  default: 1
 num_recycles: default
 num_diffusion_samples: default
 run_timeout_min: 180
 
-# Not sized yet: set these from the probe's timings before launching.
-# cloud/af3_run.sh refuses a deadline of 0.
 deadline_min:
-  default: 0
+  v5e: 225
+  v6e: 180
+  l4: 0
+  cpu: 0

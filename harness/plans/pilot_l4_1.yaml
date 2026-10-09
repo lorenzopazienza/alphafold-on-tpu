@@ -1,0 +1,24 @@
+# Pilot, G (L4), part 1 of 2: the targets below with the full design of
+# harness/plans/pilot.yaml (seeds 1 and 2, r1 and r2 fresh, w warm rerun of
+# seed 1 on the same VM). Parts 1 and 2 together cover pilot.yaml for l4
+# (analysis/tests/test_pilot_plan.py). Expected about 3.1 h on one VM.
+
+description: pilot with the official weights, L4 part 1 of 2
+label: pilot
+weights: gcs
+
+configs:
+  l4: l4_xla
+
+targets:
+  default: [7U3J, 7NP6, 7BTT, 7XQZ, 8EYE]
+
+seeds: [1, 2]
+fresh_reps: 2
+warm_rerun_seed: 1
+num_recycles: default
+num_diffusion_samples: default
+run_timeout_min: 180
+
+deadline_min:
+  l4: 255

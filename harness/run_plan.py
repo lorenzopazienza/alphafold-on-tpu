@@ -6,9 +6,10 @@
 
 A plan gives targets (a list, or "pilot" for the manifest's pilot rows, with
 an optional per-platform token cap), seeds, fresh-cache repetitions, an
-optional warm-cache rerun of one seed, recycles and samples ("default" means
-AlphaFold3's defaults), the harness configuration per platform and the
-polling deadline per platform. See harness/plans/probe.yaml.
+optional warm-cache rerun of one seed (both per platform if given as a
+mapping), recycles and samples ("default" means AlphaFold3's defaults), the
+harness configuration per platform and the polling deadline per platform.
+See harness/plans/probe.yaml.
 
 Every (config, rep, seed) is one harness session results/af3/<session>/<run>/
 in which each target runs in its own fresh process. Fresh-cache runs start
@@ -103,8 +104,8 @@ def expand(plan_path, platform, manifest_path):
 
   configs = as_list(per_platform(plan['configs'], platform))
   seeds = [int(s) for s in as_list(plan['seeds'])]
-  reps = int(plan.get('fresh_reps', '1'))
-  warm_seed = optional_int(plan.get('warm_rerun_seed', 'none'))
+  reps = int(per_platform(plan.get('fresh_reps', '1'), platform))
+  warm_seed = optional_int(per_platform(plan.get('warm_rerun_seed', 'none'), platform))
   if warm_seed is not None and warm_seed not in seeds:
     raise SystemExit(f'warm_rerun_seed {warm_seed} is not one of the seeds {seeds}')
 

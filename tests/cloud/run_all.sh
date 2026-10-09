@@ -1,10 +1,10 @@
 #!/bin/bash
-# Runs the four suites and prints one line per scenario. Output in
+# Runs the five suites and prints one line per scenario. Output in
 # $WORK/run_all.out (default ${TMPDIR:-/tmp}/af3-cloud-tests/run_all.out).
-# About 6 minutes on a laptop. Creates no cloud resources (see common.sh).
+# About 9 minutes on a laptop. Creates no cloud resources (see common.sh).
 . "$(dirname "$0")/common.sh"
 OUT="$WORK/run_all.out"
-for s in suite_1_basics suite_2_resilience suite_3_zones_gpu_plans suite_4_tpu_stack; do
+for s in suite_1_basics suite_2_resilience suite_3_zones_gpu_plans suite_4_tpu_stack suite_5_pilot; do
   echo ">> $s" >&2
   bash "$KIT/$s.sh"
 done > "$OUT" 2>&1

@@ -1,0 +1,24 @@
+# Pilot, C (CPU), part 2 of 4: seed 1 of the targets below, r1 only, as in
+# harness/plans/pilot.yaml (no r2 and no warm rerun on CPU). Parts 1 to 4
+# together cover pilot.yaml for cpu (analysis/tests/test_pilot_plan.py).
+# Expected about 3.5 h on one VM.
+
+description: pilot with the official weights, CPU part 2 of 4 (seed 1)
+label: pilot
+weights: gcs
+
+configs:
+  cpu: cpu_xla
+
+targets:
+  default: [7BTT, 7VBU, 7NPL]
+
+seeds: [1]
+fresh_reps: 1
+warm_rerun_seed: none
+num_recycles: default
+num_diffusion_samples: default
+run_timeout_min: 180
+
+deadline_min:
+  cpu: 285

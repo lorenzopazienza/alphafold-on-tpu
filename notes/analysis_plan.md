@@ -185,3 +185,21 @@ The other pairs are reported as secondary.
 | Date | Change | Reason |
 |---|---|---|
 | 2026-10-09 | First version | |
+| 2026-10-09 | Interpretations made while implementing the plan in `analysis/` (1 to 12 below), and the pilot schedule; recorded before any official-weights run | Points the plan leaves open, and an L4 quota constraint |
+
+Entry of 2026-10-09, before any official-weights run. Interpretations as implemented in `analysis/`:
+
+1. PoseBusters protein (M1): the checks run on the superposed predicted ligand with the predicted protein, moved by the same pocket superposition, as the conditioning protein (`dock` configuration). The crystal protein is available as an option (`--pb_protein crystal`) and is not the default.
+2. Structure (M6): one (target, seed) prediction with its 5 samples. Cost per structure = run_alphafold process wall time / seeds in the process × hourly price; cost per sample (divided by 5) is also reported. VM setup and idle time are not included.
+3. Amortised compilation (M6): wall − compile + compile / batch, the batch being the number of same-bucket targets among the 60 (19, 19, 14 and 8 for buckets 256, 512, 768 and 1024), a parameter of `analysis/cost.py`. Warm reruns are reported as measured, not amortised again.
+4. Memory (M7): the compiled peak plus arguments is reported as written. XLA's compiled peak already includes the arguments on GPU (peak = temporaries + arguments + output) but not on TPU, so on GPU the sum counts the arguments twice; the compiled peak alone is reported as well. The CUDA allocator preallocates its pool and reports no reservation (0), so on GPU the allocator's peak bytes in use is reported instead. CPU: max RSS.
+5. HW − RC (section 5): P is the first platform of each pair as named in section 5 (V6 for V6 vs G, V5 for V5 vs V6, G for G vs C), on the same resampled targets. HW − RC(Q) is also reported, labelled secondary. RC(C) does not exist in the pilot (C runs r1 only).
+6. SD (section 5): pairs of seeds on r1. Its top-1 flip compares sample indices of different seeds, which are unrelated draws; it is reported with that note, and only its success flip and M4/M5 are read as informative.
+7. Pilot check 3 (section 6): top-1 success on V6 uses the overall top-1 across seeds (as AlphaFold3 ranks), r1. The top-1 success per seed is reported as secondary.
+8. Bit-identical (M4, pilot check 2): in `analysis/contrasts.py`, the mmCIF coordinates are identical as written. The bit-for-bit comparison of all outputs is `harness/compare_runs.py`.
+9. Q3: each condition's success rate is computed on its own targets, and each pairwise difference on that pair's common targets (C covers 6 of the 10 pilot targets).
+10. M4 reference ("first prediction"): side A of the contrast, the first-named condition. Prediction B is superposed on A by the pocket C-alpha atoms (pocket from the crystal, as in M1), and the ligand RMSD is symmetry-corrected. The RMSD does not depend on which side is the reference.
+11. Pilot provisioning for G: on-demand (not Spot, and not Flex-start, which has no published price for g2-standard-8), with the launcher's default L4 zone list.
+12. Correction: the earlier v5e vs v6e figure of 0.91 to 1.19 Å (random weights, libtpu 0.0.43.2, 7U3J and 7D5C, 5 samples each) was all-atom RMSD without superposition (`harness/compare_samples.py`), not RMSD after global superposition. On the same samples it reproduces as 0.907 to 1.186 Å; M4 as defined here gives a protein C-alpha RMSD after global superposition of 0.88 to 1.11 Å and a ligand RMSD after pocket superposition of 0.60 to 1.42 Å.
+
+Pilot schedule: the L4 arm (G) of the pilot will run later than the TPU (V5, V6) and CPU (C) arms, because a GPU quota increase is pending.

@@ -6,7 +6,7 @@ the VM, and injects failures on request. No test creates, reads or deletes anyth
 Google Cloud.
 
 ```bash
-bash tests/cloud/run_all.sh          # all four suites (80 scenarios), about 8 minutes
+bash tests/cloud/run_all.sh          # all five suites (86 scenarios), about 11 minutes
 bash tests/cloud/mkrepo.sh           # or one scenario at a time:
 bash tests/cloud/run.sh probe_l4 ok PLATFORM=l4 FAKE_PLATFORM=l4 ZONES=us-east4-a
 ```
@@ -42,6 +42,7 @@ After adding or editing a file in `bin/`, `chmod +x` it.
 | `suite_2_resilience.sh` | Preemption, results bucket, `FETCH` light/full, L4 Flex-start, prices by region, the V0 to V9 bisection |
 | `suite_3_zones_gpu_plans.sh` | L4 zone fallback, `JAX_PLATFORMS` on the GPU path (fails on `gpu`/`rocm`), the v5e samples plan |
 | `suite_4_tpu_stack.sh` | TPU stack: `LIBTPU_VERSION`, the exit-5 check, `tpu_runtime` records, the `stack_validation` plan (two libtpu versions on one VM, switch failure, comparison after the fetch) |
+| `suite_5_pilot.sh` | The pilot launches as they will be run (`WEIGHTS=gcs`, results bucket, `FETCH=full`): `pilot.yaml` on v5e and v6e, one L4 and one CPU split plan, the weights URI never printed, the whole plan refused on l4 and cpu |
 | `run_all.sh`, `summarize.py` | All suites; a scenario fails the check if its exit code is not the expected one, a VM is left, or a GPU path sets `gpu`/`rocm` |
 | `bin/gcloud` | The fake: create, describe, ssh, scp, delete, operations, `storage rsync`; scenarios and zone behaviours listed in its header |
 | `bin/fake_rsync.py`, `bin/uv`, `bin/nvidia-smi`, `bin/setsid` | Fake bucket copy, venv installs (records the libtpu and jaxlib versions per venv), GPU listing, `setsid` for macOS |
