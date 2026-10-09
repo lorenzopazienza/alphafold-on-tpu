@@ -4,8 +4,10 @@ Status: draft for jax-ml/jax, not filed. Lorenzo decides whether and where to fi
 (jax-ml/jax issues; possibly also google-deepmind/alphafold3 as a heads-up).
 Evidence: `results/af3/20261008T205351Z_v5e_bisect/` (first bisection, commit `29f9a3b` of
 this repository), `results/af3/20261009T065048Z_v5e_bisect_samples/` (second bisection,
-commit `e8b4a6e`) and `results/af3/20261008T165218Z_v6e_probe/` (v6e reference). All runs
-used random weights; no official AlphaFold3 weights are needed to reproduce.
+commit `e8b4a6e`), `results/af3/20261008T165218Z_v6e_probe/` (v6e reference), and the stack
+validation `results/af3/20261009T125801Z_v5e_stack_validation/` and
+`results/af3/20261009T125828Z_v6e_stack_validation/`. All runs used random weights; no
+official AlphaFold3 weights are needed to reproduce.
 
 ### Update 2026-10-09 (second bisection), and whether to file
 
@@ -29,6 +31,25 @@ used random weights; no official AlphaFold3 weights are needed to reproduce.
   PyPI descriptions 0.0.42.1 to 0.0.43.2, and the Cloud TPU release notes (no entries after
   2026-06-01) mention no TPU compiler segfault, VMEM or LLO fix.
 
+### Validation of libtpu 0.0.43.2 (2026-10-09), adopted as this study's TPU stack
+
+AlphaFold3 defaults (10 recycles, 5 diffusion samples), seed 1, fresh compilation cache,
+7U3J (205 tokens) and 7D5C (1023 tokens), jax/jaxlib 0.10.2.
+
+- **v6e: libtpu 0.0.42.1 and 0.0.43.2 give bit-identical outputs.** On one v6e VM, the same
+  runs on 0.0.43.2 and then on 0.0.42.1 produced identical mmCIF coordinates, full
+  confidences and summary confidences for both targets and all 5 samples, also identical to
+  the 0.0.42.1 v6e run of 2026-10-08 on another VM. Compiled memory is identical (7D5C: peak
+  6.16 GiB, temporaries 6.90 GiB) and compile times match (7D5C: 65.3 s on both).
+- **v5e: 0.0.43.2 runs AlphaFold3's defaults up to 1023 tokens in 16 GB.** Both targets
+  compile and run (7D5C: compile 40.3 s, inference 221.8 s). The compiled 7D5C program's peak
+  is 6.16 GiB plus 1.12 GiB of arguments; the allocator's peak reservation was 5.86 GiB of
+  the 15.75 GiB limit, so roughly half of the chip's HBM.
+- v5e against v6e (different chips, same stack): coordinates are not bit-identical (each
+  sample matches the v6e sample of the same index at 0.91 to 1.19 A RMSD, random weights);
+  summary confidences are identical for 3 of 5 samples (7U3J) and 4 of 5 (7D5C), the others
+  differing by one rounding step (0.01) in a single field.
+
 **Still worth filing?** Yes, but as a short, low-priority report rather than a bug hunt,
 because it appears fixed in a newer libtpu. What it would still give: (1) a record that
 `jax[tpu]==0.10.2` pins a libtpu with which a common model (AlphaFold3 at its default
@@ -37,7 +58,8 @@ error, so that others find the workaround; (2) the questions only the maintainer
 is libtpu 0.0.43.x supported with jaxlib 0.10.2, which change fixed it, and could a compile
 failure surface as an error instead of a segfault. A heads-up on google-deepmind/alphafold3
 (v5e users need `libtpu==0.0.43.2` with the pinned jax) may help more people than the JAX
-issue. The report text below is updated with these results.
+issue. The validation above shows the workaround is safe to recommend: on v6e it changes
+nothing, bit for bit. The report text below is updated with these results.
 
 ---
 
@@ -130,6 +152,7 @@ bucket 256), with a 205-token protein-ligand complex (PDB 7U3J) and with a 1023-
 | 7U3J | 10 | 5 | harness, `LIBTPU_INIT_ARGS=--xla_tpu_scoped_vmem_limit_kib=8192` | SIGSEGV |
 | 7U3J | 10 | 5 | harness, `LIBTPU_INIT_ARGS=--xla_tpu_scoped_vmem_limit_kib=32768` | SIGSEGV |
 | 7U3J | 10 | 5 | harness, **libtpu 0.0.43.2** (jax/jaxlib 0.10.2) | **pass** |
+| 7D5C, 1023 tokens | 10 | 5 | harness, **libtpu 0.0.43.2** (jax/jaxlib 0.10.2) | **pass** (peak reservation 5.86 of 15.75 GiB) |
 | 7U3J | 10 | 5 | harness, `jax[tpu]==0.11.2` (libtpu 0.0.48) | not testable: AlphaFold3's pinned flax fails to import with jax 0.11 |
 
 The last three rows ran in copies of the same venv with only those packages changed
