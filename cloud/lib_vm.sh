@@ -39,6 +39,99 @@ vm_insert_op() {
     --format="value($1)" 2> /dev/null | head -1
 }
 
+# Classifies a failed Compute Engine create, from the create command's output
+# (stdin, mode text) or from `gcloud compute operations list --format=json`
+# (stdin, mode op). Prints one line:
+#   CAPACITY [zone ...]  stockout or capacity error; the zones are Google's
+#                        suggestions (errorDetails[].errorInfo.metadatas
+#                        .zonesAvailable, or "Consider trying your request in
+#                        the Z zone(s)" in the text), possibly none
+#   OTHER <message>      any other error (quota, permission, bad flag)
+#   NONE                 no error recorded (yet)
+# Codes as seen on 2026-10-08/09: ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS
+# with message "... (state:STOCKOUT, ...)", for on-demand and Flex-start.
+vm_classify_failure() {
+  python3 -c '
+import json, re, sys
+mode, data = sys.argv[1], sys.stdin.read()
+CAP_CODES = ("ZONE_RESOURCE_POOL_EXHAUSTED", "ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS")
+CAP_TEXT = re.compile(r"STOCKOUT|does not have enough resources|currently unavailable in the|"
+                      r"ZONE_RESOURCE_POOL_EXHAUSTED|resource_availability")
+ZONE = re.compile(r"^[a-z]+-[a-z]+[0-9]+-[a-z]$")
+def suggested(texts, metas):
+  zones = []
+  for m in metas:
+    zones += re.split(r"[,\s]+", m.get("zonesAvailable", "") or "")
+  for t in texts:
+    for g in re.findall(r"Consider trying your request in the (.+?) zone\(s\)", t):
+      zones += re.split(r"[,\s]+|\band\b", g)
+  out = []
+  for z in zones:
+    z = z.strip()
+    if ZONE.match(z) and z not in out:
+      out.append(z)
+  return out
+if mode == "op":
+  try:
+    ops = json.loads(data or "[]")
+  except ValueError:
+    ops = []
+  op = ops[0] if isinstance(ops, list) and ops else (ops if isinstance(ops, dict) else {})
+  errors = (op.get("error") or {}).get("errors") or []
+  if not errors:
+    print("NONE"); sys.exit()
+  texts, metas, codes = [], [], []
+  for e in errors:
+    codes.append(e.get("code", "")); texts.append(e.get("message", ""))
+    for d in e.get("errorDetails", []):
+      if "errorInfo" in d:
+        metas.append(d["errorInfo"].get("metadatas", {}))
+      if "localizedMessage" in d:
+        texts.append(d["localizedMessage"].get("message", ""))
+  if any(c in CAP_CODES for c in codes) or any(CAP_TEXT.search(t) for t in texts):
+    print(" ".join(["CAPACITY"] + suggested(texts, metas)))
+  else:
+    print("OTHER " + " ".join(f"{c}: {t}" for c, t in zip(codes, texts))[:400].replace("\n", " "))
+else:
+  if not data.strip():
+    print("NONE")
+  elif CAP_TEXT.search(data):
+    print(" ".join(["CAPACITY"] + suggested([data], [])))
+  else:
+    lines = [l.strip() for l in data.splitlines() if l.strip()]
+    print("OTHER " + " | ".join(lines[-3:])[:400])
+' "$1"
+}
+
+# vm_insert_failure: the classified error (see vm_classify_failure) of this
+# VM's insert operation in $ZONE, waiting up to VM_OP_WAIT_S (120) seconds for
+# the operation to finish (the VM can show STOPPING before the operation
+# records its error, as in us-east4-c on 2026-10-09).
+vm_insert_failure() {
+  local waited=0 step=10
+  while [ "$(vm_insert_op status)" != "DONE" ] && [ "$waited" -lt "${VM_OP_WAIT_S:-120}" ]; do
+    sleep "$step"; waited=$((waited + step))
+  done
+  gcloud compute operations list --project="$PROJECT" --zones="$ZONE" \
+    --filter="targetLink~/instances/$VM_NAME\$ AND operationType=insert" --format=json 2> /dev/null \
+    | vm_classify_failure op
+}
+
+# vm_clear_zone: after a failed create in $ZONE, makes sure no VM of this name
+# is left there (deletes a TERMINATED or STOPPED leftover). Returns 1 if one
+# is still there after the attempt.
+vm_clear_zone() {
+  local i
+  for i in 1 2 3 4 5 6; do
+    vm_exists || return 0
+    echo "   $VM_NAME still exists in $ZONE (status $(vm_state)); deleting it"
+    vm_delete > /dev/null 2>&1 || true
+    sleep "${VM_CLEAR_SLEEP_S:-10}"
+  done
+  vm_exists && { echo "!! $VM_NAME is still in $ZONE; delete it by hand"; return 1; }
+  return 0
+}
+
 # vm_create_gce "FLAGS": Compute Engine create, asynchronous (vm_wait_running
 # follows). MIN_CPU_PLATFORM, if set, is passed as its own quoted flag.
 vm_create_gce() {
@@ -53,7 +146,8 @@ vm_create_gce() {
 vm_create_tpu() { gcloud compute tpus tpu-vm create "$VM_NAME" $GC $1; }
 
 # vm_wait_running MAX_WAIT_S: until the VM runs. Status printed at most once a
-# minute. Returns 1 with a message if the request fails or times out.
+# minute (poll every VM_POLL_S, 15, seconds). Returns 1 with a message if the
+# request fails or times out.
 vm_wait_running() {
   local max="$1" start now status err last=0
   start=$(date +%s)
@@ -84,7 +178,7 @@ vm_wait_running() {
       echo "   $(date -u +%H:%M:%SZ) status=${status:-not created yet}"
       last=$now
     fi
-    sleep 15
+    sleep "${VM_POLL_S:-15}"
   done
 }
 

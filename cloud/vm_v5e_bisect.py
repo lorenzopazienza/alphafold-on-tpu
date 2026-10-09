@@ -3,6 +3,24 @@
     python3 cloud/vm_v5e_bisect.py --out results/af3/<session> --session <session> \\
         --job_start EPOCH_SECONDS [--budget_min 80] [--timeout_min 15]
     python3 cloud/vm_v5e_bisect.py --list      # the variants, one per line
+    python3 cloud/vm_v5e_bisect.py --plan cloud/plans/v5e_bisect_samples.json ...
+
+Without --plan the built-in variants V0 to V9 below run. --plan FILE (JSON)
+replaces them with the plan's own list; see cloud/plans/v5e_bisect_samples.json:
+  variants   the same fields as below (id, kind, target, what, recycles,
+             samples, entry, log_compiles, cache, only_if_crashed), plus
+             env          extra environment variables for that run (for
+                          example LIBTPU_INIT_ARGS),
+             venv         the name of a venv from "venvs" to run with,
+             compare_to   a variant this one changes one thing against; the
+                          readings say whether the change avoids its crash,
+             series       "samples": part of the diffusion-samples series
+                          summarised in the readings;
+  venvs      name -> {"pip": [requirements], "find_links": URL (optional)}:
+             a copy of AlphaFold3's venv (third_party/alphafold3/.venv_NAME)
+             with those packages installed on top, made the first time a
+             variant needs it (log and pip freeze in OUT/venv_NAME*.txt). If
+             that fails, its variants are skipped with the reason.
 
 Started by cloud/vm_v5e_bisect.sh (itself started by cloud/v5e_bisect.sh) once
 cloud/vm_af3_setup.sh has installed AlphaFold3, jax[tpu] and random weights.
@@ -119,6 +137,49 @@ VARIANTS = [
 ]
 # The recycles/samples setting each V9 source stands for.
 V9_SETTINGS = {'V2': {'recycles': 1, 'samples': 1}, 'V4': {'samples': 1}, 'V5': {'recycles': 1}}
+PLAN = {}  # set from --plan
+
+
+def venv_python(name):
+  return AF3 / f'.venv_{name}' / 'bin' / 'python' if name else PY
+
+
+def prepare_venv(name, spec, out, cache={}):
+  """Copies AlphaFold3's venv to .venv_NAME and installs spec['pip'] on top.
+
+  Returns None on success, else the reason. Done once per name.
+  """
+  if name in cache:
+    return cache[name]
+  dest = AF3 / f'.venv_{name}'
+  logf = out / f'venv_{name}.txt'
+  uv = shutil.which('uv') or str(pathlib.Path.home() / '.local' / 'bin' / 'uv')
+  steps = []
+  if not dest.exists():
+    steps.append(['cp', '-a', str(AF3 / '.venv'), str(dest)])
+  install = [uv, 'pip', 'install', '--python', str(dest / 'bin' / 'python')] + list(spec['pip'])
+  if spec.get('find_links'):
+    install += ['-f', spec['find_links']]
+  steps += [install]
+  reason = None
+  with open(logf, 'w') as f:
+    for cmd in steps:
+      f.write('$ ' + ' '.join(cmd) + '\n')
+      f.flush()
+      try:
+        rc = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT, timeout=900).returncode
+      except (OSError, subprocess.TimeoutExpired) as e:
+        rc, reason = None, f'{type(e).__name__}: {e}'
+      if rc != 0:
+        reason = reason or f'{cmd[0]} {cmd[1]} exited {rc}'
+        break
+  if reason is None:
+    freeze = subprocess.run([uv, 'pip', 'freeze', '--python', str(dest / 'bin' / 'python')],
+                            capture_output=True, text=True)
+    (out / f'venv_{name}_freeze.txt').write_text(freeze.stdout)
+  cache[name] = reason
+  log(f'venv {name}: {"ready" if reason is None else "FAILED: " + reason}')
+  return reason
 
 
 def log(msg):
@@ -216,7 +277,7 @@ def make_inputs(out):
 
 def run_direct(v, vdir, timeout_s, direct_inputs):
   vdir.mkdir(parents=True)
-  cmd = [str(PY), 'run_alphafold.py', f'--json_path={direct_inputs[v["target"]]}',
+  cmd = [str(venv_python(v.get('venv'))), 'run_alphafold.py', f'--json_path={direct_inputs[v["target"]]}',
          f'--output_dir={vdir / "af3_output"}', f'--model_dir={WEIGHTS}', '--jax_backend=tpu',
          '--flash_attention_implementation=xla', '--run_data_pipeline=false']
   if v.get('recycles'):
@@ -224,6 +285,7 @@ def run_direct(v, vdir, timeout_s, direct_inputs):
   if v.get('samples'):
     cmd.append(f'--num_diffusion_samples={v["samples"]}')
   extra = dict(VERBOSE) if v.get('verbose', True) else {}
+  extra.update(v.get('env', {}))
   if v.get('dump'):
     extra['XLA_FLAGS'] = f'--xla_dump_to={vdir / "xla_dump"}' + (
         ' --xla_dump_hlo_pass_re=.*' if v['dump'] == 'passes' else '')
@@ -239,7 +301,7 @@ def run_direct(v, vdir, timeout_s, direct_inputs):
       os.killpg(proc.pid, signal.SIGKILL)
       rc, timed_out = proc.wait(), True
   outputs = [p for p in (vdir / 'af3_output').rglob('*.cif')] if (vdir / 'af3_output').exists() else []
-  shown = ['.venv/bin/python'] + cmd[1:]
+  shown = [os.path.relpath(cmd[0], AF3)] + cmd[1:]
   return {'command': f'cd {AF3} && ' + ''.join(f'{k}={val} ' for k, val in extra.items())
                      + ' '.join(shown),
           'exit_code': rc, 'timed_out': timed_out, 'wall_seconds': round(time.monotonic() - t0, 1),
@@ -263,7 +325,9 @@ def run_harness(v, vdir, timeout_s, session, manifest):
     cmd += ['--num_recycles', str(setting['recycles'])]
   if setting['samples']:
     cmd += ['--num_diffusion_samples', str(setting['samples'])]
-  extra = dict(VERBOSE)
+  if v.get('venv'):
+    cmd += ['--python', str(venv_python(v['venv']))]
+  extra = dict(VERBOSE, **v.get('env', {}))
   env = dict(os.environ, **extra)
   hlog = vdir.parent / f'{v["id"]}.harness.log'
   t0, timed_out = time.monotonic(), False
@@ -288,7 +352,7 @@ def run_harness(v, vdir, timeout_s, session, manifest):
           'has_mmcif': bool(rec and any(o.endswith('.cif') for o in rec['outputs'])),
           'harness_failure': rec['failure'] if rec else 'no run.json (harness did not finish)',
           'compile': rec['compile'] if rec else None, 'memory': rec.get('memory') if rec else None,
-          'af3_log': vdir / v['target'] / 'run_alphafold.log'}
+          'af3_log': vdir / v['target'] / 'run_alphafold.log' if rec else vdir / 'harness.log'}
 
 
 def result_of(r):
@@ -333,16 +397,45 @@ def readings(by_id):
   return out
 
 
+def plan_readings(by_id):
+  """Readings for a --plan run: the samples series and each compare_to pair."""
+  res = {k: result_of(v) for k, v in by_id.items()}
+  crashed = lambda k: res.get(k, '').startswith('signal')  # noqa: E731
+  passed = lambda k: res.get(k) == 'pass'  # noqa: E731
+  out = []
+  series = [(v.get('samples') or 5, v['id']) for v in PLAN.get('variants', [])
+            if v.get('series') == 'samples' and v['id'] in res and not res[v['id']].startswith('skipped')]
+  if series:
+    ok = sorted(n for n, k in series if passed(k))
+    bad = sorted(n for n, k in series if crashed(k))
+    other = sorted(f'{n} ({res[k]})' for n, k in series if not passed(k) and not crashed(k))
+    out.append(f'Diffusion samples that compile and run: {ok or "none"}; that segfault: {bad or "none"}'
+               + (f'; other: {", ".join(other)}' if other else '') + '.')
+  for v in PLAN.get('variants', []):
+    ref, k = v.get('compare_to'), v['id']
+    if not ref or k not in res or ref not in res or res[k].startswith('skipped'):
+      continue
+    if crashed(ref) and passed(k):
+      out.append(f'{k} avoids the crash: {v["what"]} passes where {ref} segfaults.')
+    elif crashed(ref) and crashed(k):
+      out.append(f'{k} does not avoid it: {v["what"]} segfaults like {ref}.')
+    elif crashed(ref):
+      out.append(f'{k}: {res[k]} ({v["what"]}); see its harness.log / last50.txt.')
+  return out
+
+
 def write_summary(out, records):
   by_id = {r['id']: r for r in records}
   slim = [{k: v for k, v in r.items() if k not in ('last_50_lines', 'af3_log')} for r in records]
   for r in slim:
     r['result'] = result_of(r)
-  summary = {'updated_utc': utc_now(), 'variants': slim, 'readings': readings(by_id)}
+  summary = {'updated_utc': utc_now(), 'plan': PLAN.get('name'), 'variants': slim,
+             'readings': plan_readings(by_id) if PLAN else readings(by_id)}
   (out / 'bisect_summary.json').write_text(json.dumps(scrub(summary), indent=2) + '\n')
-  lines = [f'{"id":4} {"result":30} {"wall_s":>7}  what']
+  w = max([4] + [len(r['id']) for r in slim])
+  lines = [f'{"id":{w}} {"result":38} {"wall_s":>7}  what']
   for r in slim:
-    lines.append(f'{r["id"]:4} {r["result"][:30]:30} {r.get("wall_seconds") or "":>7}  {r["what"]}')
+    lines.append(f'{r["id"]:{w}} {r["result"][:38]:38} {r.get("wall_seconds") or "":>7}  {r["what"]}')
   lines += [''] + [f'reading: {x}' for x in summary['readings']]
   (out / 'bisect_summary.txt').write_text('\n'.join(lines) + '\n')
   return lines
@@ -356,10 +449,20 @@ def main():
   ap.add_argument('--budget_min', type=float, default=80)
   ap.add_argument('--timeout_min', type=float, default=15)
   ap.add_argument('--list', action='store_true', help='print the variants and exit')
+  ap.add_argument('--plan', help='JSON plan with its own variants (default: built-in V0 to V9)')
   args = ap.parse_args()
+  variants = VARIANTS
+  if args.plan:
+    PLAN.update(json.loads((REPO / args.plan).read_text()))
+    PLAN.setdefault('name', pathlib.Path(args.plan).stem)
+    variants = PLAN['variants']
+    for v in variants:
+      if v.get('venv') and v['venv'] not in PLAN.get('venvs', {}):
+        raise SystemExit(f'plan: variant {v["id"]} uses venv {v["venv"]}, not in "venvs"')
   if args.list:
-    for v in VARIANTS:
-      print(f'{v["id"]:4} {v["what"]}')
+    w = max(len(v['id']) for v in variants)
+    for v in variants:
+      print(f'{v["id"]:{w}} {v["what"]}')
     return
   if not (args.out and args.session and args.job_start):
     ap.error('--out, --session and --job_start are required')
@@ -378,7 +481,7 @@ def main():
       f'{args.timeout_min:g} min per variant')
 
   records, by_id = [], {}
-  for v in VARIANTS:
+  for v in variants:
     rec = {'id': v['id'], 'what': v['what'], 'kind': v['kind'], 'target': v['target']}
     vdir = out / v['id']
     left = deadline - time.time()
@@ -393,6 +496,13 @@ def main():
         rec['setting_from'] = src
     if 'skipped' not in rec and left < MIN_START_S:
       rec['skipped'] = f'budget ({left / 60:.1f} min left)'
+    if 'skipped' not in rec and v.get('venv'):
+      why = prepare_venv(v['venv'], PLAN['venvs'][v['venv']], out)
+      if why:
+        rec['skipped'] = f'venv {v["venv"]} not ready: {why}'[:200]
+      left = deadline - time.time()
+      if 'skipped' not in rec and left < MIN_START_S:
+        rec['skipped'] = f'budget ({left / 60:.1f} min left)'
     if 'skipped' in rec:
       log(f'{v["id"]}: skipped ({rec["skipped"]})')
       records.append(rec)
@@ -401,7 +511,7 @@ def main():
       continue
     timeout_s = min(args.timeout_min * 60, left)
     rec.update(timeout_seconds=round(timeout_s), recycles=v.get('recycles'), samples=v.get('samples'),
-               start_utc=utc_now())
+               env=v.get('env'), venv=v.get('venv'), start_utc=utc_now())
     log(f'{v["id"]}: {v["what"]} (timeout {timeout_s / 60:.1f} min)')
     try:
       if v['kind'] == 'direct':

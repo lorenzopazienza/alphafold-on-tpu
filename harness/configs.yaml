@@ -13,6 +13,11 @@
 #
 # Recycles and diffusion samples are AlphaFold3's defaults (10 and 5) unless
 # the harness is given --num_recycles or --num_diffusion_samples.
+#
+# GPU configurations set JAX_PLATFORMS: cuda, never gpu: JAX 0.10.2 expands
+# "gpu" to cuda, rocm and oneapi and fails on rocm, which is not installed
+# (L4 probe, 2026-10-09). With cuda, a missing or broken GPU is an error
+# instead of a silent fallback to another backend.
 
 # cpu_xla pins JAX to the CPU. Without it, on Apple silicon the jax-mps plugin
 # that AlphaFold3 installs becomes JAX's default backend: helper operations run
@@ -30,6 +35,7 @@ l4_xla:
   jax_backend: gpu
   flash_attention_implementation: xla
   env:
+    JAX_PLATFORMS: cuda
     XLA_FLAGS: --xla_gpu_enable_triton_gemm=false
     XLA_PYTHON_CLIENT_PREALLOCATE: true
     XLA_CLIENT_MEM_FRACTION: 0.95
@@ -39,6 +45,7 @@ l4_triton:
   jax_backend: gpu
   flash_attention_implementation: triton
   env:
+    JAX_PLATFORMS: cuda
     XLA_FLAGS: --xla_gpu_enable_triton_gemm=false
     XLA_PYTHON_CLIENT_PREALLOCATE: true
     XLA_CLIENT_MEM_FRACTION: 0.95
@@ -48,6 +55,7 @@ t4_xla:
   jax_backend: gpu
   flash_attention_implementation: xla
   env:
+    JAX_PLATFORMS: cuda
     XLA_FLAGS: --xla_disable_hlo_passes=custom-kernel-fusion-rewriter
     XLA_PYTHON_CLIENT_PREALLOCATE: true
     XLA_CLIENT_MEM_FRACTION: 0.95

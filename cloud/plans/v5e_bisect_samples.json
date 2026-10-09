@@ -1,0 +1,48 @@
+{
+  "name": "v5e_bisect_samples",
+  "description": "Second v5e bisection (2026-10-09): diffusion-sample threshold, scoped VMEM limit, newer libtpu stacks. 7U3J, seed 1, 10 recycles, harness with the probe's settings (af3_entry.py, JAX_LOG_COMPILES, fresh cache). Run with: BISECT_PLAN=cloud/plans/v5e_bisect_samples.json bash cloud/v5e_bisect.sh",
+  "venvs": {
+    "libtpu043": {
+      "pip": ["libtpu==0.0.43.2"],
+      "find_links": "https://storage.googleapis.com/jax-releases/libtpu_releases.html"
+    },
+    "jax0112": {
+      "pip": ["jax[tpu]==0.11.2"],
+      "find_links": "https://storage.googleapis.com/jax-releases/libtpu_releases.html"
+    }
+  },
+  "variants": [
+    {"id": "S1", "kind": "harness", "target": "7U3J", "entry": true, "log_compiles": true, "cache": "fresh",
+     "samples": 1, "series": "samples",
+     "what": "control: 1 diffusion sample (expected to pass, as V4)"},
+    {"id": "S5", "kind": "harness", "target": "7U3J", "entry": true, "log_compiles": true, "cache": "fresh",
+     "series": "samples",
+     "what": "control: 5 diffusion samples, AF3 default (expected to segfault, as V5)"},
+    {"id": "S2", "kind": "harness", "target": "7U3J", "entry": true, "log_compiles": true, "cache": "fresh",
+     "samples": 2, "series": "samples", "what": "2 diffusion samples"},
+    {"id": "S4", "kind": "harness", "target": "7U3J", "entry": true, "log_compiles": true, "cache": "fresh",
+     "samples": 4, "series": "samples", "what": "4 diffusion samples"},
+    {"id": "S3", "kind": "harness", "target": "7U3J", "entry": true, "log_compiles": true, "cache": "fresh",
+     "samples": 3, "series": "samples", "what": "3 diffusion samples"},
+    {"id": "S5x8192", "kind": "harness", "target": "7U3J", "entry": true, "log_compiles": true, "cache": "fresh",
+     "env": {"LIBTPU_INIT_ARGS": "--xla_tpu_scoped_vmem_limit_kib=8192"},
+     "only_if_crashed": "S5", "compare_to": "S5",
+     "what": "5 samples, LIBTPU_INIT_ARGS=--xla_tpu_scoped_vmem_limit_kib=8192 (default 16384)"},
+    {"id": "S5x32768", "kind": "harness", "target": "7U3J", "entry": true, "log_compiles": true, "cache": "fresh",
+     "env": {"LIBTPU_INIT_ARGS": "--xla_tpu_scoped_vmem_limit_kib=32768"},
+     "only_if_crashed": "S5", "compare_to": "S5",
+     "what": "5 samples, LIBTPU_INIT_ARGS=--xla_tpu_scoped_vmem_limit_kib=32768 (default 16384)"},
+    {"id": "S5l043", "kind": "harness", "target": "7U3J", "entry": true, "log_compiles": true, "cache": "fresh",
+     "venv": "libtpu043", "only_if_crashed": "S5", "compare_to": "S5",
+     "what": "5 samples, jaxlib 0.10.2 with libtpu 0.0.43.2 (outside the jax[tpu]==0.10.2 pin; diagnostic)"},
+    {"id": "S5l0112", "kind": "harness", "target": "7U3J", "entry": true, "log_compiles": true, "cache": "fresh",
+     "venv": "jax0112", "only_if_crashed": "S5", "compare_to": "S5",
+     "what": "5 samples, jax[tpu]==0.11.2 (libtpu 0.0.48.*; newest stack; diagnostic)"}
+  ],
+  "compare": {
+    "reference": "results/af3/20261008T165218Z_v6e_probe/tpu_xla_rep1_seed1_fresh/7U3J/af3_output/7U3J",
+    "reference_label": "v6e probe, 7U3J seed 1, 10 recycles, 5 samples",
+    "variants": ["S1", "S2", "S3", "S4", "S5x8192", "S5x32768"],
+    "subpath": "7U3J/af3_output/7U3J"
+  }
+}

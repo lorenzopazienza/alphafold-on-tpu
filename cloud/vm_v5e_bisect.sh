@@ -6,7 +6,10 @@
 # variants (cloud/vm_v5e_bisect.py). OUT is results/af3/<session> inside the
 # checkout; everything in it is fetched.
 #
-#   SESSION= BISECT_BUDGET_MIN= VARIANT_TIMEOUT_MIN= [RESULTS_URI=] bash cloud/vm_v5e_bisect.sh OUT
+#   SESSION= BISECT_BUDGET_MIN= VARIANT_TIMEOUT_MIN= [RESULTS_URI=] [BISECT_PLAN=] bash cloud/vm_v5e_bisect.sh OUT
+#
+# BISECT_PLAN: optional JSON plan (path in the checkout) passed to
+# vm_v5e_bisect.py --plan; without it the built-in variants V0 to V9 run.
 #
 # The budget counts from this script's start, setup included.
 # Exit status: setup's (3 inputs, 4 weights, 5 device, other: install), or
@@ -15,6 +18,7 @@ set -uo pipefail
 OUT=${1:?output folder}
 : "${SESSION:?}" "${BISECT_BUDGET_MIN:?}" "${VARIANT_TIMEOUT_MIN:?}"
 RESULTS_URI="${RESULTS_URI:-}"
+BISECT_PLAN="${BISECT_PLAN:-}"
 JOB_START=$(date +%s)
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mkdir -p "$OUT"
@@ -40,7 +44,7 @@ if [ "$rc" -ne 0 ]; then
 fi
 
 python3 cloud/vm_v5e_bisect.py --out "$OUT" --session "$SESSION" --job_start "$JOB_START" \
-  --budget_min "$BISECT_BUDGET_MIN" --timeout_min "$VARIANT_TIMEOUT_MIN"
+  --budget_min "$BISECT_BUDGET_MIN" --timeout_min "$VARIANT_TIMEOUT_MIN" ${BISECT_PLAN:+--plan "$BISECT_PLAN"}
 rc=$?
 find "$OUT" -path '*/work/input_seeds.json' -delete 2> /dev/null || true
 echo ">> [$(date -u +%H:%M:%S)] bisect: finished, exit code $rc"

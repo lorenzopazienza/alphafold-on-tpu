@@ -140,9 +140,23 @@ print(json.dumps({'python': platform.python_version(), 'packages': pk,
 '''
 
 
+def jax_platforms_for(backend):
+  """JAX_PLATFORMS for an AlphaFold3 --jax_backend: never "gpu".
+
+  JAX 0.10.2 expands the platform alias "gpu" to cuda, rocm and oneapi and
+  fails on the first one that is not installed (rocm on an L4 VM, 2026-10-09);
+  jax/_src/xla_bridge.py, expand_platform_alias and backends().
+  """
+  return 'cuda' if backend == 'gpu' else backend
+
+
 def probe(python, env, backend):
-  """Package versions and devices, from a separate process of the AF3 python."""
-  env = dict(env, JAX_PLATFORMS=backend)
+  """Package versions and devices, from a separate process of the AF3 python.
+
+  Uses the configuration's JAX_PLATFORMS if it sets one, else
+  jax_platforms_for(backend).
+  """
+  env = dict(env, JAX_PLATFORMS=env.get('JAX_PLATFORMS') or jax_platforms_for(backend))
   out = subprocess.run([python, '-c', PROBE], capture_output=True, text=True, env=env, timeout=600)
   if out.returncode != 0:
     raise SystemExit(f'Environment probe failed:\n{out.stderr[-2000:]}')

@@ -10,6 +10,8 @@
 # JAX per platform: TPU swaps AlphaFold3's CUDA JAX for jax[tpu]==0.10.2 (as
 # the smoke tests do); L4 keeps AlphaFold3's pinned CUDA JAX and must show an
 # L4; CPU keeps the default install (the cpu_xla config sets JAX_PLATFORMS=cpu).
+# The device check is cloud/vm_device_check.sh (JAX_PLATFORMS=cuda on L4; it
+# writes OUT/device_check.txt, which explains any failure).
 # Writes OUT/setup.json, OUT/pip_freeze.txt and OUT/weights.json. Exit 3 if
 # an input does not match the manifest, 4 for a weights problem, 5 if JAX does
 # not see the expected device.
@@ -76,37 +78,6 @@ WEIGHTS="$WEIGHTS" bash "$ROOT/cloud/vm_af3_weights.sh" "$WEIGHTS_DIR" "$OUT" ||
 
 step "devices and versions"
 uv pip freeze --python "$PY" > "$OUT/pip_freeze.txt"
-case "$PLATFORM" in cpu) BACKEND=cpu ;; l4) BACKEND=gpu ;; *) BACKEND=tpu ;; esac
-JAX_PLATFORMS=$BACKEND "$PY" - "$OUT/setup.json" "$PLATFORM" "$BACKEND" "$AF3_COMMIT" <<'EOF' || exit 5
-import importlib.metadata as md
-import json
-import sys
-
-import jax
-
-out, platform, backend, commit = sys.argv[1:5]
-packages = {}
-for name in ('alphafold3', 'jax', 'jaxlib', 'libtpu', 'jax-cuda12-plugin', 'jax-cuda12-pjrt',
-             'tokamax', 'dm-haiku', 'numpy', 'rdkit'):
-  try:
-    packages[name] = md.version(name)
-  except md.PackageNotFoundError:
-    packages[name] = None
-devices = jax.devices()
-kind = devices[0].device_kind
-with open(out.replace('setup.json', 'weights.json')) as f:
-  weights = json.load(f)
-info = {'platform': platform, 'jax_backend': jax.default_backend(), 'device_kind': kind,
-        'devices': [str(d) for d in devices], 'alphafold3_commit': commit,
-        'packages': packages, 'weights': weights}
-with open(out, 'w') as f:
-  json.dump(info, f, indent=2)
-print(f'   backend {info["jax_backend"]}, {len(devices)} device(s), kind {kind}')
-for name in ('jax', 'jaxlib', 'libtpu', 'jax-cuda12-plugin', 'tokamax'):
-  print(f'   {name:18s} {packages[name]}')
-if jax.default_backend() != backend:
-  sys.exit(f'JAX backend is {jax.default_backend()}, expected {backend}')
-if platform == 'l4' and 'L4' not in kind:
-  sys.exit(f'expected an NVIDIA L4, JAX sees {kind}')
-EOF
+# JAX_PLATFORMS is cpu, cuda or tpu there, never "gpu" (see that script).
+PLATFORM="$PLATFORM" bash "$ROOT/cloud/vm_device_check.sh" "$OUT" "$AF3_COMMIT" || exit 5
 echo ">> [$(date -u +%H:%M:%S)] setup: done"

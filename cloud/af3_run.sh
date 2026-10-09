@@ -17,7 +17,19 @@
 # v5e       legacy TPU API   v5litepod-1                   Spot (SPOT=0: on-demand)
 # v6e       Compute Engine   ct6e-standard-1t              Flex-start
 #
-# Overrides: PROJECT ZONE MACHINE_TYPE SPOT PROVISIONING (spot, standard, or
+# Zones: ZONES="z1 z2 ..." (Compute Engine platforms: cpu, l4, v6e) tries each
+# zone in order and keeps the first VM that is created. A stockout or capacity
+# error (seen when the create call fails at once, or later in the insert
+# operation, also when the VM goes STAGING, STOPPING, then disappears) moves on
+# to the next zone; any other error stops. If Google's error names zones with
+# capacity (errorDetails[].errorInfo.metadatas.zonesAvailable), those are tried
+# first, once each. Every attempt is printed; a failed zone is checked to hold
+# no VM before the next one. PLATFORM=l4 without ZONE or ZONES uses
+# L4_DEFAULT_ZONES below (every Europe and US zone with nvidia-l4 per
+# `gcloud compute accelerator-types list --filter="name=nvidia-l4"`, 2026-10-09).
+# ZONE=z alone means that one zone.
+#
+# Overrides: PROJECT ZONE ZONES MACHINE_TYPE SPOT PROVISIONING (spot, standard, or
 # flex_start for l4 and v6e; wins over SPOT) IMAGE_PROJECT IMAGE_FAMILY RUNTIME
 # (v5e) BOOT_DISK_SIZE MIN_CPU_PLATFORM (cpu) REQUEST_VALID_FOR (Flex-start
 # queue, 90s to 2h, default 2h) DETACHED_DEADLINE_MIN MAX_RUN_DURATION WEIGHTS
@@ -91,6 +103,13 @@ case "$PLATFORM" in
   l4)
     VM_API=gce
     MACHINE_TYPE="${MACHINE_TYPE:-g2-standard-8}"
+    # Europe first (europe-west4 is where the other platforms run), then the US
+    # zones, us-east4 first (it had L4 capacity on 2026-10-09).
+    L4_DEFAULT_ZONES="europe-west4-a europe-west4-b europe-west4-c europe-west1-b europe-west1-c \
+europe-west3-a europe-west3-b europe-west2-a europe-west2-b europe-west6-b europe-west6-c \
+us-east4-a us-east4-c us-central1-a us-central1-b us-central1-c us-east1-b us-east1-c us-east1-d \
+us-west1-a us-west1-b us-west1-c us-west4-a us-west4-c"
+    if [ -z "${ZONES:-}" ] && [ -z "${ZONE:-}" ]; then ZONES=$L4_DEFAULT_ZONES; fi
     ZONE="${ZONE:-europe-west4-a}"
     IMAGE_PROJECT="${IMAGE_PROJECT:-ubuntu-os-accelerator-images}"
     IMAGE_FAMILY="${IMAGE_FAMILY:-ubuntu-accelerator-2204-amd64-with-nvidia-580}"
@@ -130,7 +149,19 @@ case "${PROVISIONING:-}" in
     [ "$PLATFORM" != "v6e" ] || die "PLATFORM=v6e runs with Flex-start only (PROVISIONING=flex_start)." ;;
   *) die "PROVISIONING must be spot, standard or flex_start." ;;
 esac
+# The zones to try, in order (one zone unless ZONES is set).
+ZONES=$(echo ${ZONES:-$ZONE})
+for z in $ZONES; do
+  echo "$z" | grep -Eq '^[a-z]+-[a-z]+[0-9]+-[a-z]$' || die "Not a zone name in ZONES: '$z'."
+done
+set -- $ZONES
+ZONE_COUNT=$#
+ZONE=$1
+if [ "$VM_API" = "tpu" ] && [ "$ZONE_COUNT" -gt 1 ]; then
+  die "ZONES with more than one zone is supported for the Compute Engine platforms (cpu, l4, v6e), not v5e."
+fi
 REGION="${ZONE%-*}"
+REGIONS=$(for z in $ZONES; do echo "${z%-*}"; done | awk '!seen[$0]++' | tr '\n' ' ')
 
 # "1d2h3m4s" -> seconds.
 to_seconds() {
@@ -215,9 +246,10 @@ vm_init
 # What will run and what it can cost, before anything is created. The price
 # is the row for this platform, provisioning, machine type and the zone's
 # region; any fallback is printed (PRICE_NOTES).
-PRICE_OUT=$(python3 - "$PLATFORM" "$PROVISIONING" "$MACHINE_TYPE" "$REGION" <<'EOF'
+PRICE_OUT=$(python3 - "$PLATFORM" "$PROVISIONING" "$MACHINE_TYPE" "$REGIONS" <<'EOF'
 import csv, sys
-platform, prov, machine, region = sys.argv[1:5]
+platform, prov, machine, regions = sys.argv[1:5]
+regions = regions.split()
 rows = [r for r in csv.DictReader(open('cloud/prices.csv')) if r['platform'] == platform]
 
 def pick(provisioning):
@@ -232,25 +264,33 @@ def pick(provisioning):
         return r
   return None
 
-notes = []
-row = pick(prov)
-if row is None:
-  sys.exit(0)
-if not row['usd_per_hour'].strip():
-  std = pick('standard')
-  if std is None or not std['usd_per_hour'].strip():
+notes, best, fallback = [], None, []
+for region in regions:
+  row = pick(prov)
+  if row is None:
     sys.exit(0)
-  notes.append(f"no published {prov} price for {row['machine_type']} in {row['region']} "
-               f"({row['source_url']}, read {row['read_on']}); the worst case uses the "
-               f"on-demand price as an upper bound")
-  row = std
-if row['region'] != region:
-  notes.append(f"no {platform} {prov} price for region {region} in cloud/prices.csv: "
-               f"the price shown is the {row['region']} list price, not {region}'s")
-if row['machine_type'] != machine:
-  notes.append(f"no price for {machine} in cloud/prices.csv: the price shown is for {row['machine_type']}")
-print(row['usd_per_hour'], row['read_on'], row['source_url'])
-for n in notes:
+  if not row['usd_per_hour'].strip():
+    std = pick('standard')
+    if std is None or not std['usd_per_hour'].strip():
+      sys.exit(0)
+    notes.append(f"no published {prov} price for {row['machine_type']} in {row['region']} "
+                 f"({row['source_url']}, read {row['read_on']}); the worst case uses the "
+                 f"on-demand price as an upper bound")
+    row = std
+  if row['region'] != region:
+    fallback.append((region, row['region']))
+  if row['machine_type'] != machine:
+    notes.append(f"no price for {machine} in cloud/prices.csv: the price shown is for {row['machine_type']}")
+  if best is None or float(row['usd_per_hour']) > float(best['usd_per_hour']):
+    best = row
+for used in dict.fromkeys(u for _, u in fallback):
+  missing = [r for r, u in fallback if u == used]
+  notes.append(f"no {platform} {prov} price in cloud/prices.csv for {', '.join(missing)}: "
+               f"the {used} list price is used for {'it' if len(missing) == 1 else 'them'}")
+if len(regions) > 1:
+  notes.append(f"the worst case uses the highest price among the zones' regions: {best['region']}")
+print(best['usd_per_hour'], best['read_on'], best['source_url'])
+for n in dict.fromkeys(notes):
   print(n)
 EOF
 )
@@ -271,7 +311,12 @@ print('   targets:', ', '.join(f'{t} ({d[\"tokens\"][t]} tokens)' for t in d['ta
 print(f\"   seeds {d['seeds']}, fresh-cache reps {d['fresh_reps']}, warm rerun of seed: {d['warm_rerun_seed'] or 'none'}\")
 print(f\"   recycles {d['num_recycles'] or 'AF3 default'}, diffusion samples {d['num_diffusion_samples'] or 'AF3 default'}\")
 print('   runs:', ', '.join(r['run'] for r in d['runs']))"
-echo ">> Platform $PLATFORM: $MACHINE_TYPE${RUNTIME:+ (runtime $RUNTIME)}, zone $ZONE, provisioning $PROVISIONING"
+if [ "$ZONE_COUNT" -gt 1 ]; then
+  echo ">> Platform $PLATFORM: $MACHINE_TYPE, provisioning $PROVISIONING, $ZONE_COUNT zones tried in order:"
+  echo "$ZONES" | fold -s -w 96 | sed 's/^/     /'
+else
+  echo ">> Platform $PLATFORM: $MACHINE_TYPE${RUNTIME:+ (runtime $RUNTIME)}, zone $ZONE, provisioning $PROVISIONING"
+fi
 [ "$VM_API" = "tpu" ] || echo "   image $IMAGE_PROJECT/$IMAGE_FAMILY${MIN_CPU_PLATFORM:+, min CPU platform $MIN_CPU_PLATFORM}"
 if [ "$WEIGHTS" = "gcs" ]; then echo "   weights: gcs (copied on the VM from your bucket; URI not printed)"; else echo "   weights: random (generated on the VM)"; fi
 echo "   follow deadline: $DETACHED_DEADLINE_MIN min"
@@ -279,7 +324,10 @@ if [ "$VM_API" = "tpu" ]; then
   echo "   VM lifetime limit: watchdog deletes it after $WATCHDOG_HOURS h"
 else
   echo "   VM lifetime limit: --max-run-duration=$MAX_RUN_DURATION, then Google deletes it"
-  [ "$PROVISIONING" != "flex_start" ] || echo "   Flex-start queue: up to $REQUEST_VALID_FOR (not billed while queued)"
+  if [ "$PROVISIONING" = "flex_start" ]; then
+    echo "   Flex-start queue: up to $REQUEST_VALID_FOR (not billed while queued)"
+    [ "$ZONE_COUNT" -le 1 ] || echo "     per zone: up to $ZONE_COUNT x $REQUEST_VALID_FOR of waiting if every zone queues and fails"
+  fi
 fi
 echo "   worst-case cost: \$$WORST = \$$PRICE/h x $LIFETIME_H h, list price read $PRICE_DATE"
 echo "     ($PRICE_URL; excludes boot disk and network, a few cents)"
@@ -296,7 +344,8 @@ if [ "${YES:-0}" != "1" ]; then
   case "$ANSWER" in y | Y | yes | YES) ;; *) echo ">> Not started; nothing was created."; exit 0 ;; esac
 fi
 
-# Never adopt (and later delete) a VM this run did not create.
+# Never adopt (and later delete) a VM this run did not create. (Compute
+# Engine: checked again in every zone tried.)
 if vm_exists; then die "$VM_NAME already exists in $ZONE. Delete it or set VM_NAME."; fi
 
 CREATE_ISSUED=0 STARTED=0 RUN_DONE=0
@@ -339,22 +388,65 @@ if [ "$VM_API" = "tpu" ]; then
   echo ">> Arming watchdog: $VM_NAME deletes itself in $WATCHDOG_HOURS h"
   vm_arm_watchdog "$WATCHDOG_HOURS"
 else
-  echo ">> Requesting $VM_NAME ($MACHINE_TYPE) in $ZONE, $PROVISIONING"
   FLAGS="--machine-type=$MACHINE_TYPE --image-family=$IMAGE_FAMILY --image-project=$IMAGE_PROJECT \
 --boot-disk-size=$BOOT_DISK_SIZE${BOOT_DISK_TYPE:+ --boot-disk-type=$BOOT_DISK_TYPE} \
 --provisioning-model=$(echo "$PROVISIONING" | tr 'a-z' 'A-Z') --max-run-duration=$MAX_RUN_DURATION \
 --instance-termination-action=DELETE --maintenance-policy=TERMINATE --reservation-affinity=none \
 --scopes=cloud-platform --labels=$LABELS"
   [ "$PROVISIONING" != "flex_start" ] || FLAGS="$FLAGS --request-valid-for-duration=$REQUEST_VALID_FOR"
-  vm_create_gce "$FLAGS"
-  vm_wait_running "$WAIT_S" || exit 1
+  # One attempt per zone; Google's suggested zones go to the front, once each.
+  ZONES_LEFT=$ZONES TRIED="" ATTEMPT=0 CREATED=0
+  while [ -n "$ZONES_LEFT" ]; do
+    set -- $ZONES_LEFT
+    ZONE=$1
+    shift
+    ZONES_LEFT="$*"
+    case " $TRIED " in *" $ZONE "*) continue ;; esac
+    TRIED="$TRIED $ZONE"
+    ATTEMPT=$((ATTEMPT + 1))
+    vm_init
+    echo ">> Zone attempt $ATTEMPT: requesting $VM_NAME ($MACHINE_TYPE) in $ZONE, $PROVISIONING"
+    if vm_exists; then die "$VM_NAME already exists in $ZONE. Delete it or set VM_NAME."; fi
+    CREATE_ISSUED=1
+    if CREATE_OUT=$(vm_create_gce "$FLAGS" 2>&1); then
+      echo "$CREATE_OUT" | grep -v '^ *$' | sed 's/^/   /' | head -5
+      if vm_wait_running "$WAIT_S"; then CREATED=1; break; fi
+      FAILURE=$(vm_insert_failure)
+    else
+      echo "$CREATE_OUT" | grep -v '^ *$' | sed 's/^/   /' | tail -4
+      FAILURE=$(echo "$CREATE_OUT" | vm_classify_failure text)
+    fi
+    vm_clear_zone || exit 1
+    case "$FAILURE" in
+      CAPACITY*)
+        # Nothing left in this zone and no request pending: nothing to clean up.
+        CREATE_ISSUED=0
+        SUGGESTED=$(echo ${FAILURE#CAPACITY})
+        echo "   zone $ZONE: no capacity${SUGGESTED:+; Google suggests: $SUGGESTED}"
+        [ -z "$SUGGESTED" ] || ZONES_LEFT="$SUGGESTED $ZONES_LEFT" ;;
+      NONE)
+        # For example a Flex-start request still queued: cleanup reports it.
+        echo "!! zone $ZONE: the VM did not start and the insert operation recorded no error; stopping"
+        exit 1 ;;
+      *)
+        echo "!! zone $ZONE: ${FAILURE#OTHER }"
+        echo "!! Not a capacity error; stopping (no further zones tried)"
+        exit 1 ;;
+    esac
+  done
+  if [ "$CREATED" != "1" ]; then
+    echo "!! No zone had capacity for $MACHINE_TYPE ($PROVISIONING). Tried, in order:$TRIED"
+    exit 1
+  fi
+  REGION="${ZONE%-*}"
+  echo ">> $VM_NAME is running in $ZONE (zone attempt $ATTEMPT)"
 fi
 echo ">> Waiting for SSH"
 vm_wait_ssh || exit 1
 
 echo ">> Uploading the plan's files (commit $BENCH_COMMIT)"
 TGZ=$(mktemp -t af3-run.XXXXXX)
-FILES="af3_tpu harness targets inputs/manifest.csv cloud/vm_af3_setup.sh cloud/vm_af3_weights.sh cloud/vm_af3_job.sh"
+FILES="af3_tpu harness targets inputs/manifest.csv cloud/vm_af3_setup.sh cloud/vm_af3_weights.sh cloud/vm_device_check.sh cloud/vm_af3_job.sh"
 for t in $(echo "$TARGETS" | tr ',' ' '); do FILES="$FILES data/inputs/$t.json"; done
 tar czf "$TGZ" --exclude=__pycache__ $FILES
 vm_upload "$TGZ" af3_run.tgz
