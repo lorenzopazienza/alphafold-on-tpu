@@ -186,6 +186,11 @@ The other pairs are reported as secondary.
 |---|---|---|
 | 2026-10-09 | First version | |
 | 2026-10-09 | Interpretations made while implementing the plan in `analysis/` (1 to 12 below), and the pilot schedule; recorded before any official-weights run | Points the plan leaves open, and an L4 quota constraint |
+| 2026-10-10 | Provenance of the pilot sessions of 2026-10-09. The V5, V6 and C part 1 sessions (`20261009T154308Z_v5e_pilot`, `20261009T154318Z_v6e_pilot`, `20261009T154331Z_cpu_pilot_cpu_1`) were launched at 15:43 UTC from the working tree; the same files were committed unchanged about 2 minutes later, in `47b2082` (15:44:50 UTC). C parts 2 to 4 (`20261009T172653Z_cpu_pilot_cpu_2`, `20261009T172743Z_cpu_pilot_cpu_3`, `20261009T172752Z_cpu_pilot_cpu_4`) and both L4 parts were launched after that commit, from a clean tree at `47b2082`. Evidence: on every session, the AlphaFold3 patch hash and the manifest hash recorded on the VM equal those of `47b2082`; every frozen input matched the manifest at setup; no file uploaded to the VMs was modified after 15:26 UTC. The run records' own `repo.commit` is empty and `repo.dirty` false on every cloud session, because the VM receives the files without `.git`; those two fields carry no information for cloud runs. | Record the exact code of the pilot before analysis; the run records cannot show it themselves |
+| 2026-10-10 | Network incident of 2026-10-09: the laptop running the launchers lost its network from about 16:43 to 17:24 UTC. The launchers stopped following after 10 failed SSH polls. **V6**: the VM went on; all 5 harness runs exited 0, the job finished at 17:30:33 UTC and uploaded the session to the results bucket, from which it was fetched. **C part 1**: likewise; its harness run exited 0, the job finished at 18:27:27 UTC and uploaded the session. **V5**: harness runs r1 and r2 of both seeds (4 of 5) exited 0 with 10 of 10 targets each; the launcher deleted the VM during the fifth run, the warm rerun `tpu_xla_seed1_warm`, which therefore holds 5 of its 10 targets (7U3J, 7NP6, 7V3N, 7BTT, 7VBU) and no `EXIT_CODE`. C parts 2 to 4 started after the incident and were not affected. | Document the incident and its effect on each session; no run was repeated or dropped because of it |
+| 2026-10-10 | V5 warm-cache check (section 6, check 2): in the pilot session, w exists for 5 of the 10 targets (reason: the incident above). It is completed in a separate session on one on-demand v5e with the same stack (jax/jaxlib 0.10.2, libtpu 0.0.43.2), plan `harness/plans/v5e_warm_completion.yaml`, label `v5e_warm_check`: for each of the other 5 targets (7NPL, 7VC5, 7XQZ, 8EYE, 7D5C), a fresh-cache seed-1 run that only fills the compilation cache, then the warm rerun on the same VM, compared bit for bit with that fresh run. The fresh runs of that session are not r1 or r2 of the pilot and are excluded from every pilot contrast by their label. Check 2 for V5 is reported as the 5 targets of the pilot session plus the 5 of the completion session, each warm rerun against the fresh run of its own session. | Complete a pre-specified check that the incident cut short, without changing the pilot's repetitions |
+| 2026-10-10 | L4 arm (G) of the pilot: run in two sequential parts on one VM at a time (GPU quota of 1), on-demand: `20261009T230055Z_l4_pilot_l4_1` (`pilot_l4_1.yaml`, job 23:03 to 01:29 UTC) and `20261010T013052Z_l4_pilot_l4_2` (`pilot_l4_2.yaml`, europe-west2-a, job 01:37 to 04:09 UTC). All 10 harness runs exited 0 (50 of 50 target runs). | The GPU quota allows one L4 VM; the plan's split into two parts is unchanged |
+| 2026-10-10 | Numeric precision: section 11 added (precision statement, precision-matched arms V6h and Gh, contrasts PR and HWh). | A read-only audit of the AF3 source found that float32 matmuls without explicit precision run at each backend's default (single-pass bfloat16 operands on TPU, TF32 on the L4, IEEE float32 on CPU), and that on the L4 Tokamax runs a Triton kernel for the gated linear units. Added before any pilot outcome was opened |
 
 Entry of 2026-10-09, before any official-weights run. Interpretations as implemented in `analysis/`:
 
@@ -203,3 +208,38 @@ Entry of 2026-10-09, before any official-weights run. Interpretations as impleme
 12. Correction: the earlier v5e vs v6e figure of 0.91 to 1.19 Å (random weights, libtpu 0.0.43.2, 7U3J and 7D5C, 5 samples each) was all-atom RMSD without superposition (`harness/compare_samples.py`), not RMSD after global superposition. On the same samples it reproduces as 0.907 to 1.186 Å; M4 as defined here gives a protein C-alpha RMSD after global superposition of 0.88 to 1.11 Å and a ligand RMSD after pocket superposition of 0.60 to 1.42 Å.
 
 Pilot schedule: the L4 arm (G) of the pilot will run later than the TPU (V5, V6) and CPU (C) arms, because a GPU quota increase is pending.
+
+## 11. Numeric precision (amendment of 2026-10-10, before any analysis)
+
+**What the audit found** (AF3 v3.0.4 source, jax 0.10.2, tokamax 0.0.12):
+- AF3 uses the same dtypes on every platform, CPU included: bfloat16 trunk and confidence Pairformer, float32 diffusion module, per-atom conditioning and output heads. Nothing in AF3, the patch or the harness changes them.
+- Float32 matmuls without an explicit precision (most of the diffusion module, the per-atom conditioning, single-attention logits, the distogram and confidence logits) run at the backend's default: single-pass bfloat16 operands on TPU, TensorFloat-32 on the L4, IEEE float32 on CPU.
+- On the L4, Tokamax runs a Triton kernel for the gated linear units (heuristic configuration, no runtime autotuning); TPU and CPU fall back to XLA. This holds in every L4 arm and cannot be changed without modifying AF3 code.
+- The grid attention in the `xla` arm uses the same explicit precision (bfloat16 operands, float32 accumulation) on every platform.
+
+**Consequence for the contrasts of section 5:**
+- V5 vs V6 isolates the chip within one compiler and precision policy.
+- V6 vs G and G vs C measure the whole platform stack as AF3 runs by default, including the precision and GLU-kernel differences. The paper says so explicitly and does not attribute these contrasts to the chip alone.
+
+**Precision-matched arms (added):**
+
+| Code | Platform | Setting | Role |
+|---|---|---|---|
+| V6h | TPU v6e | `xla`, `JAX_DEFAULT_MATMUL_PRECISION=highest` | precision-matched arm |
+| Gh | NVIDIA L4 | `xla`, `JAX_DEFAULT_MATMUL_PRECISION=highest` | precision-matched arm |
+
+- `highest` makes float32 matmuls without explicit precision run as IEEE float32 on the L4 and as six-pass bfloat16 (close to float32) on TPU. It does not change bfloat16 matmuls, the explicit-precision sites or the attention. CPU already runs these matmuls in float32, so C serves as the reference for both arms and is not rerun.
+- **Pilot:** V6h and Gh on the 10 pilot targets, seeds 1 and 2, r1 only, in their own sessions with the same frozen inputs and weights.
+- **Main study:** V6h and Gh on all 60 targets, seeds 1 and 2 at least; whether to extend them is decided with the pilot (section 6) and logged in section 10.
+
+**Added contrasts** (secondary, pre-specified, paired and computed as in section 5, each reported whatever it shows):
+
+| Contrast | Pairs | Measures |
+|---|---|---|
+| **Precision** PR(P) | r1 on P vs r1 on Ph, P in {V6, G} | effect of the backend's default matmul precision on the same hardware |
+| **Matched hardware** HWh(V6,G) | V6h vs Gh | platform difference with float32 matmuls matched |
+| **Matched hardware** HWh(G,C) | Gh vs C | as above, against the float32 CPU reference |
+
+**Reading rule, fixed now:** for each primary pair, the paper reports HW(P,Q) next to HWh(P,Q) and PR. A difference that shrinks to the RC level under matched precision is attributed to the default matmul precision; what remains is attributed to the platform (chip, compiler and, on the L4, the GLU kernel), without separating those further. No direction is predicted.
+
+**Residual differences not controlled:** accumulation order and fusion choices of each compiler, six-pass bfloat16 against IEEE float32, bfloat16 elementwise handling, and the L4's Triton GLU kernel. They are listed in the threats to validity.
