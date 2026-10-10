@@ -27,6 +27,27 @@ for p in procs:
   modes[r['compile_cache']['mode']] = modes.get(r['compile_cache']['mode'], 0) + 1
 print(f"   harness runs: {', '.join(r.get('run', '?') + ' exit ' + str(r.get('harness_exit_code')) for r in runs)}")
 print(f"   processes fetched: {len(procs)}; cache modes: {modes}")
+# Cache evidence (harness/run_af3.py): every fresh process starts from an empty cache and compiles
+# jit_apply_fn; every warm process loads an entry its source fresh process (same target) wrote.
+problems, warm = [], 0
+written = {}
+for p in procs:
+  r = json.loads(p.read_text())
+  c, cc = r.get('compile') or {}, r['compile_cache']
+  if cc['mode'] == 'fresh':
+    if not cc.get('started_empty') or c.get('model_cache_hit'):
+      problems.append(f"{p.parent.parent.name}/{r['pdb_id']}: fresh run did not start empty or hit the cache")
+    if cc.get('saved_to'):
+      written[r['pdb_id']] = set(cc.get('model_entries_written') or [])
+for p in procs:
+  r = json.loads(p.read_text())
+  c, cc = r.get('compile') or {}, r['compile_cache']
+  if cc['mode'] == 'warm':
+    warm += 1
+    if not c.get('model_cache_hit') or c.get('model_cache_key') not in written.get(r['pdb_id'], set()):
+      problems.append(f"{r['pdb_id']}: warm run loaded {c.get('model_cache_key')}, not its source executable")
+print(f"   cache check: {len(problems)} problem(s); {warm} warm process(es) loaded their source executable"
+      if not problems else f"   cache check: {len(problems)} problem(s): {'; '.join(problems[:3])}")
 PYEOF
 }
 echo "======== pilot launches (official weights from a bucket, results bucket, FETCH=full)"

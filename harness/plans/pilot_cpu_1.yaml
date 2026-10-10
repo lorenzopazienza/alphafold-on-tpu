@@ -4,7 +4,7 @@
 # Expected about 2.9 h on one VM.
 
 description: pilot with the official weights, CPU part 1 of 4 (seed 1)
-label: pilot
+label: pilot2
 weights: gcs
 
 configs:

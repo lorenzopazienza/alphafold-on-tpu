@@ -56,6 +56,32 @@ l4_xla_highest:
     XLA_CLIENT_MEM_FRACTION: 0.95
     JAX_DEFAULT_MATMUL_PRECISION: highest
 
+# Diagnostics only (label diag, harness/plans/diag_l4_determinism.yaml), outside
+# every pilot contrast: l4_xla plus one XLA determinism switch. Both flags are
+# registered in the pinned CUDA plugin (jax-cuda12-pjrt 0.10.2,
+# xla_cuda_plugin.so): xla_gpu_deterministic_ops "Guarantees run-to-run
+# determinism on GPU."; xla_gpu_autotune_level "Set GEMM and Convolution
+# auto-tuning level. 0 = off; 1 = on; ...".
+l4_xla_det:
+  description: NVIDIA L4, XLA attention, --xla_gpu_deterministic_ops=true (diagnostic)
+  jax_backend: gpu
+  flash_attention_implementation: xla
+  env:
+    JAX_PLATFORMS: cuda
+    XLA_FLAGS: --xla_gpu_enable_triton_gemm=false --xla_gpu_deterministic_ops=true
+    XLA_PYTHON_CLIENT_PREALLOCATE: true
+    XLA_CLIENT_MEM_FRACTION: 0.95
+
+l4_xla_noautotune:
+  description: NVIDIA L4, XLA attention, --xla_gpu_autotune_level=0 (diagnostic)
+  jax_backend: gpu
+  flash_attention_implementation: xla
+  env:
+    JAX_PLATFORMS: cuda
+    XLA_FLAGS: --xla_gpu_enable_triton_gemm=false --xla_gpu_autotune_level=0
+    XLA_PYTHON_CLIENT_PREALLOCATE: true
+    XLA_CLIENT_MEM_FRACTION: 0.95
+
 l4_triton:
   description: NVIDIA L4, Triton flash attention (the AlphaFold3 GPU default)
   jax_backend: gpu

@@ -9,7 +9,7 @@
 # 240 min (VM lifetime 270 min).
 
 description: pilot with the official weights, precision-matched arm Gh, L4 part 2 of 2
-label: pilot
+label: pilot2
 weights: gcs
 
 configs:

@@ -12,8 +12,13 @@ crashes with SIGSEGV when the venv's libtpu (fake_libtpu, written by bin/uv; mis
 0.11.2 fails at import like AlphaFold3's pinned flax does.
 FAKE_SCENARIO=bisect: also writes fake libtpu logs to $BISECT_TPU_LOG_DIR and
 fake HLO dumps where XLA_FLAGS --xla_dump_to points.
+Persistent cache, as jax 0.10.2 keys it: one jit_apply_fn executable per
+token bucket, and the key also hashes the cache directory path unless
+JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES=none (jax/_src/compiler.py puts
+<dir>/xla_gpu_per_fusion_autotune_cache_dir into the compile options). Entries
+are <key>-cache files; a hit is logged with its key, like JAX_LOG_COMPILES.
 """
-import glob, json, os, shutil, signal, sys, time
+import glob, hashlib, json, os, shutil, signal, sys, time
 from absl import app, flags
 _JSON_PATH = flags.DEFINE_string('json_path', None, '')
 _OUTPUT_DIR = flags.DEFINE_string('output_dir', None, '')
@@ -77,17 +82,23 @@ def main(_):
   if sc == 'hang':
     time.sleep(600)
   cache = _CACHE.value
+  key = path = None
   if cache:
     os.makedirs(cache, exist_ok=True)
-  key = os.path.join(cache, f'jit_apply_fn-{name}-cache') if cache else None
+    residues = sum(len(s[k]['sequence']) for s in data['sequences'] for k in s if 'sequence' in s[k])
+    bucket = next(b for b in (256, 512, 768, 1024, 1280, 1536, 2048, 4096) if residues <= b)
+    path_part = '' if os.environ.get('JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES') == 'none' else cache
+    key = 'jit_apply_fn-' + hashlib.sha256(f'{bucket}|{path_part}'.encode()).hexdigest()[:32]
+    path = os.path.join(cache, f'{key}-cache')
+  hit = bool(path and os.path.exists(path))
+  if path and not hit:
+    open(path, 'w').write('x' * 1000)
   if os.environ.get('JAX_LOG_COMPILES') == '1':
-    if key and os.path.exists(key):
-      print("Persistent compilation cache hit for 'jit_apply_fn' with key 'k'", flush=True)
+    if hit:
+      print(f"Persistent compilation cache hit for 'jit_apply_fn' with key '{key}'", flush=True)
       print('Finished XLA compilation of jit(apply_fn) in 0.4 sec', flush=True)
     else:
       print('Finished XLA compilation of jit(apply_fn) in 61.2 sec', flush=True)
-      if key:
-        open(key, 'w').write('x' * 1000)
     print('Finished XLA compilation of jit(stage) in 0.01 sec', flush=True)
   for s in seeds:
     print(f'Running model inference with seed {s} took 70.50 seconds.', flush=True)

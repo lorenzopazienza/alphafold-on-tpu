@@ -22,6 +22,10 @@ sample), with:
     (summary confidences), mean pLDDT (mean of the per-atom pLDDT AlphaFold3
     writes in the mmCIF B-factor column), the model path, and M1 (ligand RMSD,
     PoseBusters validity, success, error; analysis/score_ligand.py);
+  - per run: the persistent cache evidence of harness/run_af3.py (files in the
+    cache before the process, whether jit_apply_fn was loaded from it and
+    with which key, the jit_apply_fn entries the process wrote; keys are
+    recorded from 2026-10-11 on);
   - per run: exit code, failure, wall, inference and compile seconds, compiled
     memory (peak, temp, arguments, needed), allocator peak reservation and
     peak in use, the device memory limit, max RSS;
@@ -56,7 +60,8 @@ COLUMNS = [
     'm1_pb_failed', 'm1_error', 'model_path', 'model_sha256', 'wall_s', 'inference_s', 'compile_s',
     'compiled_peak_bytes', 'compiled_temp_bytes', 'compiled_args_bytes', 'compiled_needed_bytes',
     'alloc_peak_reserved_bytes', 'alloc_peak_in_use_bytes', 'device_bytes_limit', 'max_rss_bytes', 'weights_file',
-    'weights_sha256', 'input_sha256', 'run_input_sha256',
+    'weights_sha256', 'input_sha256', 'run_input_sha256', 'cache_files_before', 'model_cache_hit',
+    'model_cache_key', 'model_cache_written',
 ]
 
 
@@ -84,7 +89,10 @@ def repetition_of(run_name, cache_mode):
   m = re.search(r'_rep(\d+)_seed\d+_fresh$', run_name)
   if m:
     return f'r{m.group(1)}'
-  if re.search(r'_seed\d+_warm$', run_name) or cache_mode == 'warm':
+  m = re.search(r'_seed\d+_warm(\d*)$', run_name)   # _warm2, _warm3: further warm reruns (diagnostics)
+  if m:
+    return f'w{m.group(1)}'
+  if cache_mode == 'warm':
     return 'w'
   return 'r1'
 
@@ -155,6 +163,11 @@ def rows_of_run(folder, manifest):
     run_cols = dict(base, target=t, num_tokens=r.get('num_tokens'), bucket=r.get('bucket'),
                     exit_code=r.get('exit_code'), failure=r.get('failure'), wall_s=r.get('wall_seconds'),
                     compile_s=(r.get('compile') or {}).get('model_seconds'),
+                    cache_files_before=((r.get('compile_cache') or {}).get('before') or {}).get('files'),
+                    model_cache_hit=(r.get('compile') or {}).get('model_cache_hit'),
+                    model_cache_key=(r.get('compile') or {}).get('model_cache_key'),
+                    model_cache_written=';'.join((r.get('compile_cache') or {}).get('model_entries_written') or [])
+                    or None,
                     compiled_peak_bytes=c.get('peak_memory_in_bytes'), compiled_temp_bytes=c.get('temp_size_in_bytes'),
                     compiled_args_bytes=c.get('argument_size_in_bytes'),
                     compiled_needed_bytes=c.get('device_bytes_needed'),

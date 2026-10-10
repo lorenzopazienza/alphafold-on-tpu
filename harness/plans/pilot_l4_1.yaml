@@ -4,7 +4,7 @@
 # (analysis/tests/test_pilot_plan.py). Expected about 3.1 h on one VM.
 
 description: pilot with the official weights, L4 part 1 of 2
-label: pilot
+label: pilot2
 weights: gcs
 
 configs:

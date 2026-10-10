@@ -19,7 +19,7 @@
 # Format: the YAML subset of harness/configs.yaml, plus inline lists [a, b].
 
 description: pilot with the official weights, precision-matched arm Gh (L4, highest matmul precision)
-label: pilot
+label: pilot2
 weights: gcs
 
 configs:

@@ -43,7 +43,7 @@ def test_pilot_targets():
 def test_accelerators_run_the_full_design(platform):
   d = expand(PLANS / 'pilot.yaml', platform, MANIFEST)
   assert sorted(d['targets']) == PILOT
-  assert d['weights'] == 'gcs' and d['label'] == 'pilot'
+  assert d['weights'] == 'gcs' and d['label'] == 'pilot2'
   assert d['num_recycles'] is None and d['num_diffusion_samples'] is None
   assert cells(d) == {(t, s, r) for t in PILOT for s in (1, 2) for r in ('r1', 'r2')} | {(t, 1, 'w') for t in PILOT}
   warm = [r for r in d['runs'] if r['cache'] == 'warm']
@@ -63,7 +63,7 @@ def test_split_plans_cover_the_pilot_exactly(platform):
   parts = [expand(PLANS / name, platform, MANIFEST) for name in SPLITS[platform]]
   union = set()
   for p in parts:
-    assert p['weights'] == 'gcs' and p['label'] == 'pilot' and p['deadline_min'] > 0
+    assert p['weights'] == 'gcs' and p['label'] == 'pilot2' and p['deadline_min'] > 0
     assert p['num_recycles'] is None and p['num_diffusion_samples'] is None
     c = cells(p)
     assert not (union & c), 'two split plans run the same (target, seed, repetition)'
@@ -96,7 +96,7 @@ def test_matched_arm_follows_section_11(code):
   plan, platform, config, _, _ = MATCHED[code]
   d = expand(PLANS / plan, platform, MANIFEST)
   assert sorted(d['targets']) == PILOT
-  assert d['weights'] == 'gcs' and d['label'] == 'pilot'
+  assert d['weights'] == 'gcs' and d['label'] == 'pilot2'
   assert d['num_recycles'] is None and d['num_diffusion_samples'] is None
   assert d['configs'] == [config]
   assert d['warm_rerun_seed'] is None and not any(r['save_cache'] for r in d['runs'])
@@ -119,7 +119,7 @@ def test_matched_split_plans_cover_the_arm_exactly(code):
   union = set()
   for name in MATCHED_SPLITS[code]:
     p = expand(PLANS / name, platform, MANIFEST)
-    assert (p['weights'], p['label'], p['configs']) == ('gcs', 'pilot', [config])
+    assert (p['weights'], p['label'], p['configs']) == ('gcs', 'pilot2', [config])
     assert p['num_recycles'] is None and p['num_diffusion_samples'] is None
     assert 0 < p['deadline_min'] and p['deadline_min'] + 30 <= 270, 'each VM within about 4.5 h'
     c = cells(p)

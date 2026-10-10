@@ -1,0 +1,47 @@
+# Diagnostic (label diag, outside every pilot contrast): why the L4 warm reruns
+# of the pilot differed from their source runs (check 2, 2026-10-10). One
+# on-demand L4, official weights, 7NP6 and 7BTT (both bucket 512; they differed
+# in the pilot), seed 1, AlphaFold3 defaults, with the persistent-cache fix of
+# 2026-10-11 (each warm process loads the executable its source fresh run saved).
+#
+# Per config, in order of information value:
+#   rep1 (fresh, saves its cache), warm, warm2 (both load rep1's executable),
+#   rep2 (fresh, compiles again in a new process).
+#   warm vs warm2 (and rep1 vs warm): the same executable twice; a difference
+#     is run-time nondeterminism.
+#   rep1 vs rep2: two compilations; a difference with identical warm loads is
+#     compile-time nondeterminism (for example GEMM autotuning).
+#   1. l4_xla: the pilot's configuration.
+#   2. l4_xla_det: plus --xla_gpu_deterministic_ops=true.
+#   3. l4_xla_noautotune: plus --xla_gpu_autotune_level=0 (optional; the plan
+#      runs it last, so cutting the session short loses only this one).
+# Compare with harness/compare_runs.py (rep1 against every later run of the
+# same config) and harness/compare_samples.py --bitwise (warm against warm2).
+#
+# Sizing (G pilot run records of 7NP6 and 7BTT: fresh 218 to 222 s, warm hit
+# 167 s; setup 5.6 min): 24 processes, about 77 min at the pilot's speed;
+# deadline 2 x setup + 2 x runs (the deterministic variants may be slower),
+# rounded up to 15 min: 165 min (VM lifetime 195 min).
+#
+# Format: the YAML subset of harness/configs.yaml, plus inline lists [a, b].
+
+description: diagnostic, L4 run-time and compile-time determinism (7NP6, 7BTT, seed 1)
+label: diag
+weights: gcs
+
+configs:
+  l4: [l4_xla, l4_xla_det, l4_xla_noautotune]
+
+targets:
+  default: [7NP6, 7BTT]
+
+seeds: [1]
+fresh_reps: 2
+warm_rerun_seed: 1
+warm_reruns: 2
+num_recycles: default
+num_diffusion_samples: default
+run_timeout_min: 180
+
+deadline_min:
+  l4: 165

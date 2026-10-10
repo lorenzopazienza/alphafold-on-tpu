@@ -18,11 +18,26 @@ and both hashes are recorded.
 Compile cache (--compile_cache):
   fresh       a new, empty JAX persistent compilation cache directory for every
               process, deleted after its size is recorded (default);
-  warm:NAME   the named directory data/jax_cache/NAME, reused across processes
-              and sessions; entries before and after each run are recorded;
+  warm:NAME   data/jax_cache/NAME/<target>: the executables the fresh run with
+              --save_fresh_cache NAME saved for the same target; entries before
+              and after each run are recorded;
   none        no --jax_compilation_cache_dir at all, so JAX's persistent cache
               stays off, as in a plain run_alphafold.py call (diagnostics:
               cloud/vm_v5e_bisect.py).
+With a persistent cache (fresh or warm), every process also gets
+JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES=none (CACHE_ENV). Without it, jax 0.10.2
+writes <cache dir>/xla_gpu_per_fusion_autotune_cache_dir into the compile
+options on every backend (jax/_src/compiler.py get_compile_options, default of
+jax_persistent_cache_enable_xla_caches in jax/_src/config.py), and
+jax/_src/cache_key.py hashes the compile options with that path in them: an
+executable saved from one directory is never found from another (pilot of
+2026-10-09/10: no warm rerun loaded its source run's executable). With it the
+key does not depend on the directory; on GPU, XLA's autotuning results are
+then kept in memory only, not written next to the cache.
+Each process records in run.json which jit_apply_fn entries its cache held
+before (compile_cache.model_entries_before), which it wrote
+(model_entries_written), whether a fresh cache started empty (started_empty)
+and, with --log_compiles, the key of the entry it loaded (compile.model_cache_key).
 
 Output: results/af3/<session>/ with session.json (configuration, machine,
 packages, device, on TPU the libtpu build (tpu_runtime), weights and manifest
@@ -42,9 +57,12 @@ Optional records (flags):
                       the persistent cache was hit; AlphaFold3's own log does
                       not separate compilation from inference;
   --save_fresh_cache NAME
-                      with --compile_cache fresh, merge each process's new
-                      cache into data/jax_cache/NAME before deleting it, so a
-                      later warm:NAME rerun reuses exactly those executables;
+                      with --compile_cache fresh, copy each process's cache
+                      into data/jax_cache/NAME/<target> before deleting it, so
+                      a later warm:NAME rerun of that target loads exactly that
+                      executable (one folder per target: same-bucket targets
+                      share a key, and a shared folder would let a later
+                      target's executable replace an earlier one's);
   --upload_uri gs://...
                       after each target, copy this session's folder to that
                       folder of the results bucket (gcloud storage rsync,
@@ -229,7 +247,10 @@ LOG_PATTERNS = {
 
 
 COMPILE_LINE = re.compile(r'Finished XLA compilation of jit\(([^)]*)\) in ([\d.]+) sec')
-CACHE_HIT_LINE = re.compile(r"Persistent compilation cache hit for '([^']*)'")
+CACHE_HIT_LINE = re.compile(r"Persistent compilation cache hit for '([^']*)'(?: with key '([^']*)')?")
+MODEL_ENTRY = re.compile(r'(jit_apply_fn-[0-9a-f]+)-cache$')   # jax/_src/lru_cache.py: <key>-cache
+# Keeps the persistent cache key independent of the cache directory (see the docstring).
+CACHE_ENV = {'JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES': 'none'}
 OOM_LINE = re.compile(r'RESOURCE_EXHAUSTED|[Oo]ut of memory|\bOOM\b')
 
 
@@ -238,12 +259,21 @@ def parse_compiles(text):
   times = [(m.group(1), float(m.group(2))) for m in COMPILE_LINE.finditer(text)]
   if not times:
     return None
-  hits = [m.group(1) for m in CACHE_HIT_LINE.finditer(text)]
+  hits = [(m.group(1), m.group(2)) for m in CACHE_HIT_LINE.finditer(text)]
   model = [t for name, t in times if name == 'apply_fn']
+  model_keys = [key for name, key in hits if name == 'jit_apply_fn' and key]
   return {'model_seconds': round(sum(model), 3) if model else None,
           'model_compiles': len(model),
           'total_seconds': round(sum(t for _, t in times), 3), 'compiles': len(times),
-          'cache_hits': len(hits), 'model_cache_hit': 'jit_apply_fn' in hits}
+          'cache_hits': len(hits), 'model_cache_hit': any(name == 'jit_apply_fn' for name, _ in hits),
+          'model_cache_key': model_keys[0] if model_keys else None}
+
+
+def model_entries(path):
+  """Keys of the jit_apply_fn executables in a persistent cache directory, sorted."""
+  if not path or not pathlib.Path(path).is_dir():
+    return []
+  return sorted(m.group(1) for p in pathlib.Path(path).iterdir() if (m := MODEL_ENTRY.match(p.name)))
 
 
 def classify_failure(rc, timed_out, text):
@@ -397,6 +427,8 @@ def main():
   env = dict(os.environ, PYTHONUNBUFFERED='1')
   env.update(cfg.get('env', {}))
   extra_env = {'JAX_LOG_COMPILES': '1'} if args.log_compiles else {}
+  if args.compile_cache != 'none':
+    extra_env.update(CACHE_ENV)
   env.update(extra_env)
   warm_dir = None
   if args.compile_cache.startswith('warm:'):
@@ -456,10 +488,11 @@ def main():
       run_input = work / 'input_seeds.json'
       run_input.write_text(json.dumps(data, indent=2) + '\n')
     no_cache = args.compile_cache == 'none'
-    cache_dir = None if no_cache else (warm_dir if warm_dir else work / 'jax_cache')
+    cache_dir = None if no_cache else (warm_dir / row['pdb_id'] if warm_dir else work / 'jax_cache')
     if cache_dir:
       cache_dir.mkdir(parents=True, exist_ok=True)
     cache_before = dir_stats(cache_dir) if cache_dir else None
+    entries_before = model_entries(cache_dir)
 
     def from_af3(path):
       return os.path.relpath(path, af3_dir)
@@ -505,9 +538,10 @@ def main():
     outputs = sorted(str(p.relative_to(tdir)) for p in (tdir / 'af3_output').rglob('*')
                      if p.is_file() and (p.suffix == '.cif' or p.name.endswith('summary_confidences.json')))
     cache_after = dir_stats(cache_dir) if cache_dir else None
+    entries_written = sorted(set(model_entries(cache_dir)) - set(entries_before))
     saved_to = None
     if args.compile_cache == 'fresh' and args.save_fresh_cache:
-      dest = REPO / 'data' / 'jax_cache' / args.save_fresh_cache
+      dest = REPO / 'data' / 'jax_cache' / args.save_fresh_cache / row['pdb_id']
       shutil.copytree(cache_dir, dest, dirs_exist_ok=True)
       saved_to = rel(dest)
     if args.compile_cache == 'fresh':
@@ -529,7 +563,9 @@ def main():
         'weights_sha256': session_info['weights']['sha256'],
         'compile_cache': {'mode': session_info['compile_cache']['mode'],
                           'dir': rel(cache_dir) if cache_dir else None,
-                          'before': cache_before, 'after': cache_after},
+                          'before': cache_before, 'after': cache_after,
+                          'started_empty': (cache_before['files'] == 0) if cache_before else None,
+                          'model_entries_before': entries_before, 'model_entries_written': entries_written},
         'output_dir': str((tdir / 'af3_output').relative_to(REPO)), 'outputs': outputs,
         'failure': classify_failure(rc, timed_out, log_text),
         'compile': parse_compiles(log_text),

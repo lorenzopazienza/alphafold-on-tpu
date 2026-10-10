@@ -30,6 +30,12 @@ is the installed one, switching with cloud/vm_tpu_stack.sh --switch (jax and
 jaxlib unchanged). A failed switch stops the plan with exit status 5. Without
 the key, nothing is switched and run names are as before.
 
+warm_reruns (optional, per platform, default 1): how many warm reruns of
+warm_rerun_seed, each loading the executables of the same source run; the
+first is named <config>_seed<S>_warm, the others _warm2, _warm3, ... Two warm
+loads of one executable separate run-time from compile-time nondeterminism
+(diagnostics; the pilot uses one).
+
 compare_reference (optional, per platform): a harness run folder of an
 earlier session; cloud/af3_run.sh compares the fetched session with it
 (harness/compare_runs.py, bit for bit and by RMSD).
@@ -108,6 +114,9 @@ def expand(plan_path, platform, manifest_path):
   warm_seed = optional_int(per_platform(plan.get('warm_rerun_seed', 'none'), platform))
   if warm_seed is not None and warm_seed not in seeds:
     raise SystemExit(f'warm_rerun_seed {warm_seed} is not one of the seeds {seeds}')
+  warm_reps = int(per_platform(plan.get('warm_reruns', '1'), platform))
+  if warm_reps < 1:
+    raise SystemExit(f'warm_reruns must be 1 or more, not {warm_reps}')
 
   libtpu = [v for v in as_list(per_platform(plan.get('libtpu', 'none'), platform)) if v != 'none']
   for v in libtpu:
@@ -128,8 +137,8 @@ def expand(plan_path, platform, manifest_path):
           runs.append({'run': f'{name}_rep{rep}_seed{seed}_fresh', 'config': config, 'rep': rep,
                        'seed': seed, 'cache': 'fresh', 'libtpu': version,
                        'save_cache': warm_seed == seed and rep == 1})
-      if warm_seed is not None:
-        runs.append({'run': f'{name}_seed{warm_seed}_warm', 'config': config, 'rep': None,
+      for w in range(1, warm_reps + 1) if warm_seed is not None else ():
+        runs.append({'run': f'{name}_seed{warm_seed}_warm{w if w > 1 else ""}', 'config': config, 'rep': None,
                      'seed': warm_seed, 'cache': 'warm', 'save_cache': False, 'libtpu': version,
                      'source_run': f'{name}_rep1_seed{warm_seed}_fresh'})
   reference = per_platform(plan.get('compare_reference', 'none'), platform)

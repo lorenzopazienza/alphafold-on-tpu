@@ -378,6 +378,38 @@ def q3(ok, args):
   return pd.DataFrame(rows), answer
 
 
+def cache_checks(d):
+  """Check 2's preconditions, from the cache evidence harness/run_af3.py records (collect.py columns).
+
+  2a: every fresh process started from an empty persistent cache and compiled jit_apply_fn (section 2).
+  2b: every warm process loaded jit_apply_fn from the cache, with a key its source process (r1, same
+      condition, target and seed) wrote; only then does its bit-identity test the cache.
+  """
+  rows = []
+  if 'model_cache_hit' not in d.columns:
+    return rows
+  procs = d.drop_duplicates(['session', 'target', 'seed'])
+  for c, g in procs.groupby('condition'):
+    fresh = g[g.repetition != 'w']
+    bad = fresh[(fresh.cache_files_before != 0) | (fresh.model_cache_hit == True)]  # noqa: E712
+    rows.append({'check': '2a fresh runs started from an empty cache', 'condition': c,
+                 'value': f'{len(fresh) - len(bad)}/{len(fresh)} processes',
+                 'detail': ('pass' if bad.empty else 'FAIL: ' + '; '.join(
+                     f'{r.target} {r.repetition} seed {r.seed}' for r in bad.itertuples()))[:300]})
+    warm = g[g.repetition == 'w']
+    if warm.empty:
+      continue
+    source = {(r.target, r.seed): set(str(r.model_cache_written).split(';'))
+              for r in fresh[fresh.repetition == 'r1'].itertuples() if isinstance(r.model_cache_written, str)}
+    loaded = [r for r in warm.itertuples()
+              if r.model_cache_hit == True and r.model_cache_key in source.get((r.target, r.seed), set())]  # noqa: E712
+    missing = sorted(set(warm.target) - {r.target for r in loaded})
+    rows.append({'check': '2b warm rerun loaded its source executable', 'condition': c,
+                 'value': f'{len(loaded)}/{len(warm)} processes',
+                 'detail': ('pass' if not missing else 'FAIL: ' + ', '.join(missing))[:300]})
+  return rows
+
+
 def checks(d, ok, sample_pairs, args):
   rows = []
   for c, g in d.groupby('condition'):
@@ -385,6 +417,7 @@ def checks(d, ok, sample_pairs, args):
     failed = runs[runs.exit_code != 0]
     rows.append({'check': '1 exit codes', 'condition': c, 'value': f'{len(runs) - len(failed)}/{len(runs)} processes exit 0',
                  'detail': '; '.join(f'{r.target} {r.repetition} seed {r.seed}: {r.failure}' for r in failed.itertuples())[:300]})
+  rows += cache_checks(d)
   for c in sorted(ok.condition.unique()):
     w = sample_pairs[sample_pairs.contrast == f'W({c})']
     if len(w):

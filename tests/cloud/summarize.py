@@ -3,13 +3,16 @@
 A scenario fails the check if its exit code differs from the expected one
 (EXPECTED, as validated on 2026-10-09), if a VM is still there (or left in a
 zone), or if a JAX_PLATFORMS value containing gpu or rocm was seen outside
-the two regression scenarios that inject one on purpose. A scenario missing
-from the output also fails.
+the two regression scenarios that inject one on purpose. The pilot scenarios
+(EXPECT_CACHE_CHECK) must also print "cache check: 0 problem(s)" (suite 5:
+fresh processes start empty, warm processes load their source executable).
+A scenario missing from the output also fails.
 """
 import re
 import sys
 
 EXPECT_VIOLATION = {'l4_regress_setup', 'l4_regress_config'}
+EXPECT_CACHE_CHECK = {'pilot_v5e', 'pilot_v6e', 'pilot_l4_1', 'pilot_cpu_2'}
 EXPECTED = {
     'probe_cpu': 0, 'probe_l4': 0, 'probe_v5e': 0, 'probe_v6e': 0, 'oom_v5e': 1, 'drop_v6e': 0,
     'lost_l4': 1, 'deadline_l4': 1, 'gcs_v6e': 0, 'mismatch_remote': 3, 'mismatch_local': 1,
@@ -54,6 +57,9 @@ for line in open(sys.argv[1]).read().splitlines():
     cur['viol'] = int(m.group(1))
   if line.startswith('  fetched: '):
     cur['fetched'] = 'no' if 'nothing' in line else 'yes'
+  m = re.search(r'cache check: (\d+) problem', line)
+  if m:
+    cur['cache_problems'] = int(m.group(1))
 bad = 0
 for r in rows:
   if 'rc' not in r:
@@ -65,11 +71,13 @@ for r in rows:
     continue
   viol = r.get('viol', 0)
   ok = (r['exists'] == 'no' and not r['left'] and (viol == 0) != (r['name'] in EXPECT_VIOLATION)
-        and int(r['rc']) == EXPECTED.get(r['name']))
+        and int(r['rc']) == EXPECTED.get(r['name'])
+        and (r['name'] not in EXPECT_CACHE_CHECK or r.get('cache_problems') == 0))
   bad += not ok
   print(f"{'ok ' if ok else 'BAD'} {r['name']:28} exit {r['rc']:>3}  created {r['created']:22} deleted {r['deleted']:4}"
         f" left {'YES' if r['exists'] != 'no' or r['left'] else 'no ':3} fetched {r.get('fetched', '-'):3}"
-        f" gpu/rocm {r.get('viol', '-')}")
+        f" gpu/rocm {r.get('viol', '-')}" + (f" cache {r.get('cache_problems', 'MISSING')}"
+                                            if r['name'] in EXPECT_CACHE_CHECK else ''))
 missing = sorted(set(EXPECTED) - {r['name'] for r in rows})
 for name in missing:
   print(f'BAD {name}: missing from the output')
