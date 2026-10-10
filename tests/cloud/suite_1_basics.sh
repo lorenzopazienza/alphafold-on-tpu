@@ -8,7 +8,10 @@ bash "$KIT/mkrepo.sh"
 for p in cpu l4 v5e v6e; do bash "$R" probe_$p ok PLATFORM=$p FAKE_PLATFORM=$p; done
 bash "$R" oom_v5e oom PLATFORM=v5e FAKE_PLATFORM=v5e
 bash "$R" drop_v6e drop PLATFORM=v6e FAKE_PLATFORM=v6e
-bash "$R" lost_l4 lost PLATFORM=l4 FAKE_PLATFORM=l4 ZONE=europe-west4-a DETACHED_MAX_SSH_FAILS=3
+# SSH lost while the API reports the VM running: since 2026-10-10 the launcher
+# follows on to the deadline (1 min here) instead of deleting after 3 polls.
+bash "$R" lost_l4 lost PLATFORM=l4 FAKE_PLATFORM=l4 ZONE=europe-west4-a DETACHED_MAX_SSH_FAILS=3 DETACHED_DEADLINE_MIN=1 \
+  DETACHED_MAX_BACKOFF_S=8
 bash "$R" deadline_l4 hang PLATFORM=l4 FAKE_PLATFORM=l4 ZONE=europe-west4-a DETACHED_DEADLINE_MIN=1
 bash "$R" gcs_v6e ok PLATFORM=v6e FAKE_PLATFORM=v6e WEIGHTS=gcs WEIGHTS_GCS_URI=gs://private-weights/af3.bin.zst
 bash "$R" mismatch_remote tamper_remote PLATFORM=v6e FAKE_PLATFORM=v6e

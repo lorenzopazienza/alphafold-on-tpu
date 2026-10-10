@@ -16,8 +16,8 @@ python3 -m pytest analysis -q
 | Script | Plan | Output (under `results/analysis/<name>/`) |
 |---|---|---|
 | `score_ligand.py` | M1 | one prediction's ligand RMSD, PoseBusters checks, success; `--self_test` scores the crystal against itself |
-| `collect.py` | sections 4, 8 | `samples.csv`: one row per (platform, attention, libtpu, target, seed, repetition, sample) |
-| `contrasts.py` | M2 to M5, sections 5, 6, 8 | `contrasts/`: flip rates, M4/M5 medians and p90, bootstrap intervals, HW minus RC, Q3, pilot checks, `report.md` |
+| `collect.py` | sections 4, 8, 11 | `samples.csv`: one row per (platform, attention, libtpu, target, seed, repetition, sample); runs with `JAX_DEFAULT_MATMUL_PRECISION=highest` are the section 11 conditions V6h and Gh |
+| `contrasts.py` | M2 to M5, sections 5, 6, 8, 11 | `contrasts/`: flip rates, M4/M5 medians and p90, bootstrap intervals, HW minus RC, Q3, pilot checks, the section 11 contrasts PR and HWh, `report.md` |
 | `cost.py` | M6, M7 | `cost/`: cost per structure and per sample at each price, amortised compilation, memory per bucket, `report.md` |
 
 M1, as implemented: the pocket is every crystal residue (data/rcsb/) with a heavy atom within 10 Å of a

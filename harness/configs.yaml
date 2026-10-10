@@ -40,6 +40,22 @@ l4_xla:
     XLA_PYTHON_CLIENT_PREALLOCATE: true
     XLA_CLIENT_MEM_FRACTION: 0.95
 
+# Precision-matched arm Gh (notes/analysis_plan.md, section 11): l4_xla plus
+# JAX_DEFAULT_MATMUL_PRECISION=highest, so float32 matmuls without an explicit
+# precision run as IEEE float32 instead of TF32. JAX reads the variable at
+# import (jax/_src/config.py, jax_default_matmul_precision); session.json
+# records it under xla_env.
+l4_xla_highest:
+  description: NVIDIA L4, XLA attention, float32 matmuls at highest precision (Gh)
+  jax_backend: gpu
+  flash_attention_implementation: xla
+  env:
+    JAX_PLATFORMS: cuda
+    XLA_FLAGS: --xla_gpu_enable_triton_gemm=false
+    XLA_PYTHON_CLIENT_PREALLOCATE: true
+    XLA_CLIENT_MEM_FRACTION: 0.95
+    JAX_DEFAULT_MATMUL_PRECISION: highest
+
 l4_triton:
   description: NVIDIA L4, Triton flash attention (the AlphaFold3 GPU default)
   jax_backend: gpu
@@ -64,3 +80,13 @@ tpu_xla:
   description: Cloud TPU (v5e or v6e, single chip), XLA attention, af3_tpu.patch
   jax_backend: tpu
   flash_attention_implementation: xla
+
+# Precision-matched arm V6h (notes/analysis_plan.md, section 11): tpu_xla plus
+# JAX_DEFAULT_MATMUL_PRECISION=highest, so float32 matmuls without an explicit
+# precision run as six-pass bfloat16 instead of one pass.
+tpu_xla_highest:
+  description: Cloud TPU, XLA attention, af3_tpu.patch, float32 matmuls at highest precision (V6h)
+  jax_backend: tpu
+  flash_attention_implementation: xla
+  env:
+    JAX_DEFAULT_MATMUL_PRECISION: highest

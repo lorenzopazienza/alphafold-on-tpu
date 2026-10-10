@@ -1,0 +1,29 @@
+# Pilot, Gh (L4, highest matmul precision), part 1 of 2: the targets below
+# with the design of harness/plans/pilot_l4h.yaml (seeds 1 and 2, r1 only).
+# Parts 1 and 2 together cover pilot_l4h.yaml (analysis/tests/test_pilot_plan.py);
+# the targets are those of pilot_l4_1.yaml.
+#
+# Sizing (random-weight L4 probe, as in pilot_l4h.yaml): about 68 min of runs
+# at the default precision, 203 min if highest makes them 3 times slower;
+# setup about 8.4 min. Deadline 2 x setup + 3 x runs, rounded up to 15 min:
+# 225 min (VM lifetime 255 min).
+
+description: pilot with the official weights, precision-matched arm Gh, L4 part 1 of 2
+label: pilot
+weights: gcs
+
+configs:
+  l4: l4_xla_highest
+
+targets:
+  default: [7U3J, 7NP6, 7BTT, 7XQZ, 8EYE]
+
+seeds: [1, 2]
+fresh_reps: 1
+warm_rerun_seed: none
+num_recycles: default
+num_diffusion_samples: default
+run_timeout_min: 180
+
+deadline_min:
+  l4: 225

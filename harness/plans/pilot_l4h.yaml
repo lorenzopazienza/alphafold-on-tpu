@@ -1,0 +1,39 @@
+# Pilot, precision-matched arm Gh (notes/analysis_plan.md, section 11): L4
+# with float32 matmuls at the highest precision (config l4_xla_highest:
+# l4_xla plus JAX_DEFAULT_MATMUL_PRECISION=highest). The 10 pilot targets,
+# seeds 1 and 2, r1 only (one fresh-cache run per seed, no r2, no warm rerun),
+# official weights from the private bucket (WEIGHTS=gcs), AlphaFold3's
+# defaults. Its own sessions, label pilot; analysis/collect.py names the
+# condition Gh from the JAX_DEFAULT_MATMUL_PRECISION value recorded in
+# session.json (xla_env).
+#
+# Sizing (random-weight L4 probe: 7U3J bucket 256 126 s wall, 7D5C bucket
+# 1024 706 s; buckets 512 and 768 interpolated linearly; 10 s per process):
+# about 2.4 h of runs at the default precision, 7.1 h if highest makes them
+# 3 times slower. That is more than one VM should hold, so the arm runs as
+# two sequential VMs (GPU quota of 1) on pilot_l4h_1.yaml and
+# pilot_l4h_2.yaml, with the target split of pilot_l4_1/2.yaml; together they
+# cover exactly this plan (analysis/tests/test_pilot_plan.py). The deadline
+# here is 0, which cloud/af3_run.sh refuses, so this file cannot start a 7 h VM.
+#
+# Format: the YAML subset of harness/configs.yaml, plus inline lists [a, b].
+
+description: pilot with the official weights, precision-matched arm Gh (L4, highest matmul precision)
+label: pilot
+weights: gcs
+
+configs:
+  l4: l4_xla_highest
+
+targets:
+  default: pilot
+
+seeds: [1, 2]
+fresh_reps: 1
+warm_rerun_seed: none
+num_recycles: default
+num_diffusion_samples: default
+run_timeout_min: 180
+
+deadline_min:
+  l4: 0

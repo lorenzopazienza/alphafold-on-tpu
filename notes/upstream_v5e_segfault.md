@@ -20,8 +20,10 @@ official AlphaFold3 weights are needed to reproduce.
   `libtpu_lts_20260630_b_RC06`; 0.0.42.1 is `libtpu_lts_20260615_b_RC03`) compiles and runs
   the 5-sample program on the same v5e (compile 32.9 s; 1 sample with 0.0.42.1: 30.3 s).
   Each of its 5 samples matches the v6e 0.0.42.1 sample of the same index at 0.92 to 1.19 A
-  coordinate RMSD (random weights), the other pairings being 53 to 100 A apart. 0.0.43.2 is
-  outside the `libtpu==0.0.42.*` pin of `jax[tpu]==0.10.2`; its PyPI description only says
+  all-atom RMSD without superposition (random weights, 7U3J), the other pairings being 53 to
+  100 A apart on the same measure. After superposition, the same pairs differ by 0.92 to
+  1.09 A (protein C-alpha, global superposition) and 0.60 to 0.89 A (ligand, after superposing
+  the pocket C-alpha atoms). 0.0.43.2 is outside the `libtpu==0.0.42.*` pin of `jax[tpu]==0.10.2`; its PyPI description only says
   "libtpu supports JAX 0.7.1 or newer". We did not test 0.0.43 or 0.0.43.1, so the fixing
   release is not narrowed down.
 - The newest stack (`jax[tpu]==0.11.2`, libtpu 0.0.48) could not be tested with AlphaFold3
@@ -45,10 +47,12 @@ AlphaFold3 defaults (10 recycles, 5 diffusion samples), seed 1, fresh compilatio
   compile and run (7D5C: compile 40.3 s, inference 221.8 s). The compiled 7D5C program's peak
   is 6.16 GiB plus 1.12 GiB of arguments; the allocator's peak reservation was 5.86 GiB of
   the 15.75 GiB limit, so roughly half of the chip's HBM.
-- v5e against v6e (different chips, same stack): coordinates are not bit-identical (each
-  sample matches the v6e sample of the same index at 0.91 to 1.19 A RMSD, random weights);
-  summary confidences are identical for 3 of 5 samples (7U3J) and 4 of 5 (7D5C), the others
-  differing by one rounding step (0.01) in a single field.
+- v5e against v6e (different chips, same stack): coordinates are not bit-identical. Each
+  sample matches the v6e sample of the same index at 0.91 to 1.19 A all-atom RMSD without
+  superposition (random weights, 7U3J and 7D5C); after superposition, at 0.88 to 1.11 A
+  (protein C-alpha, global superposition) and 0.60 to 1.42 A (ligand, after superposing the
+  pocket C-alpha atoms). Summary confidences are identical for 3 of 5 samples (7U3J) and 4 of
+  5 (7D5C), the others differing by one rounding step (0.01) in a single field.
 
 **Still worth filing?** Yes, but as a short, low-priority report rather than a bug hunt,
 because it appears fixed in a newer libtpu. What it would still give: (1) a record that
@@ -238,4 +242,5 @@ VMEM or resource error) instead of a segfault.
   that this combination is supported, and did not test 0.0.43 or 0.0.43.1.
 - With libtpu 0.0.43.2 the 5 samples are the expected ones: AlphaFold3 draws them with JAX's
   partitionable threefry, so each sample k matches sample k of the v6e run (0.92 to 1.19 A
-  RMSD with random weights) and not the others (53 to 100 A).
+  all-atom RMSD without superposition, random weights) and not the others (53 to 100 A on the
+  same measure).

@@ -9,7 +9,12 @@ the roots: results/af3/ by default, or a local copy of the results bucket
 only). One row per (platform, attention, libtpu, target, seed, repetition,
 sample), with:
   - condition: platform code (V5, V6, G, GT, C; plan section 3), attention,
-    libtpu version and build label, device kind, zone and machine type;
+    libtpu version and build label, device kind, zone and machine type, and
+    the default matmul precision (JAX_DEFAULT_MATMUL_PRECISION as recorded
+    in session.json xla_env, empty if unset). The precision-matched arms of
+    plan section 11 (configs tpu_xla_highest and l4_xla_highest) set it to
+    highest and get the code with an "h": V6h, Gh. Any other value is kept
+    apart as CODE[value], never merged with the default arm;
   - repetition: r1, r2, ... (fresh-cache repetitions) or w (warm rerun), from
     the run name harness/run_plan.py gives; num_recycles and
     num_diffusion_samples (AlphaFold3 defaults 10 and 5 when not set);
@@ -43,7 +48,8 @@ sys.path.insert(0, str(REPO / 'analysis'))
 
 PLATFORM_BY_KIND = {'TPU v5 lite': 'V5', 'TPU v6 lite': 'V6', 'cpu': 'C'}
 COLUMNS = [
-    'session', 'run', 'label', 'platform', 'attention', 'device_kind', 'libtpu', 'libtpu_build', 'jax',
+    'session', 'run', 'label', 'platform', 'attention', 'matmul_precision', 'device_kind', 'libtpu',
+    'libtpu_build', 'jax',
     'zone', 'machine_type', 'target', 'num_tokens', 'bucket', 'seed', 'repetition', 'cache', 'sample',
     'num_recycles', 'num_diffusion_samples', 'exit_code', 'failure', 'ranking_score', 'ptm', 'iptm',
     'mean_plddt', 'has_clash', 'fraction_disordered', 'm1_ligand_rmsd', 'm1_pb_valid', 'm1_success',
@@ -62,10 +68,16 @@ def sha256(path):
   return h.hexdigest()
 
 
-def platform_of(kind, attention):
+def platform_of(kind, attention, matmul_precision=None):
+  """Condition code: section 3's platform code, with "h" for the section 11 arms (highest precision)."""
   if 'L4' in kind:
-    return 'GT' if attention == 'triton' else 'G'
-  return PLATFORM_BY_KIND.get(kind, kind)
+    code = 'GT' if attention == 'triton' else 'G'
+  else:
+    code = PLATFORM_BY_KIND.get(kind, kind)
+  if not matmul_precision:
+    return code
+  # No "_" in the code: contrasts.py --condition platform_libtpu splits the condition at the first "_".
+  return f'{code}h' if matmul_precision == 'highest' else f'{code}[{matmul_precision.replace("_", "-")}]'
 
 
 def repetition_of(run_name, cache_mode):
@@ -113,12 +125,15 @@ def rows_of_run(folder, manifest):
   sargs = session.get('args') or {}
   attention = cfg.get('flash_attention_implementation')
   kind = probe.get('device_kind', '')
+  # What the run's environment held (run_af3.py records XLA_, JAX_ and TF_ variables).
+  precision = (session.get('xla_env') or {}).get('JAX_DEFAULT_MATMUL_PRECISION') or None
   tpu = session.get('tpu_runtime') or {}
   host = session.get('host') or {}
   base = {
       'session': str(folder.relative_to(REPO)) if folder.resolve().is_relative_to(REPO) else folder.name,
-      'run': folder.name, 'label': session.get('label'), 'platform': platform_of(kind, attention),
-      'attention': attention, 'device_kind': kind, 'libtpu': (probe.get('packages') or {}).get('libtpu'),
+      'run': folder.name, 'label': session.get('label'), 'platform': platform_of(kind, attention, precision),
+      'attention': attention, 'matmul_precision': precision, 'device_kind': kind,
+      'libtpu': (probe.get('packages') or {}).get('libtpu'),
       'libtpu_build': tpu.get('build_label'), 'jax': (probe.get('packages') or {}).get('jax'),
       'zone': host.get('gce_zone'), 'machine_type': host.get('gce_machine_type') or host.get('gce_accelerator_type'),
       'num_recycles': sargs.get('num_recycles') or 10,

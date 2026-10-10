@@ -33,6 +33,8 @@ EXPECTED = {
     'stack_switch_fail': 5, 'stack_bisect_default': 0, 'stack_prompt_v5e': 0, 'stack_prompt_v6e': 0,
     'pilot_v5e': 0, 'pilot_v6e': 0, 'pilot_l4_1': 0, 'pilot_cpu_2': 0, 'pilot_refuse_l4': 1,
     'pilot_refuse_cpu': 1,
+    'net_loss_running': 0, 'net_loss_deadline': 1, 'net_loss_vm_gone': 1, 'exit_code_bucket': 0,
+    'exit_code_bucket_ssh_lost': 0, 'resume_record': 0, 'resume_legacy': 0,
 }
 rows, cur = [], None
 for line in open(sys.argv[1]).read().splitlines():

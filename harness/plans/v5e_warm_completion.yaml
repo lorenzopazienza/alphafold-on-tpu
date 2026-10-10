@@ -1,0 +1,45 @@
+# v5e warm-cache check, completion (notes/analysis_plan.md, section 6, check 2).
+# The pilot session 20261009T154308Z_v5e_pilot ran the warm rerun
+# (tpu_xla_seed1_warm) for 5 of its 10 targets only: the launcher deleted the
+# VM during that run after a network loss on the laptop (2026-10-09). This
+# plan completes the check for the other 5 targets, in a separate session on
+# one on-demand v5e (SPOT=0), same stack as the pilot (jax/jaxlib 0.10.2,
+# libtpu 0.0.43.2, the launcher's default), official weights.
+#
+# Per target: a fresh-cache seed-1 run that keeps its compiled executables
+# (tpu_xla_rep1_seed1_fresh), then the warm rerun on the same VM that loads
+# them (tpu_xla_seed1_warm), to be compared bit for bit with that fresh run.
+# The fresh runs here exist only to fill the cache for this check: they are
+# NOT r1 or r2 of the pilot. The session label (v5e_warm_check, recorded in
+# every session.json) keeps them out of the pilot analysis, which selects
+# label "pilot" (analysis/contrasts.py --labels pilot); the check itself is
+# W(V5) computed on this session alone (--labels v5e_warm_check).
+#
+# Sizing (random-weight timings on v5e, libtpu 0.0.43.2; the same compute as
+# with official weights): about 36 min of runs + 4.5 min of setup, about
+# 50 min of VM time with creation, upload and fetch. The deadline (90 min) is
+# above the usual 2 x setup + 1.4 x runs (60 min) to leave margin for the warm
+# rerun; the VM lifetime is the deadline + 30 min = 2 h, the same whole-hour
+# watchdog (and worst case, $3.12 at $1.56/h) as a 60 min deadline.
+#
+# Format: the YAML subset of harness/configs.yaml, plus inline lists [a, b].
+
+description: v5e warm-cache check for the 5 pilot targets whose warm rerun was cut (cache-seeding fresh runs, not pilot repetitions)
+label: v5e_warm_check
+weights: gcs
+
+configs:
+  v5e: tpu_xla
+
+targets:
+  v5e: [7NPL, 7VC5, 7XQZ, 8EYE, 7D5C]
+
+seeds: [1]
+fresh_reps: 1
+warm_rerun_seed: 1
+num_recycles: default
+num_diffusion_samples: default
+run_timeout_min: 180
+
+deadline_min:
+  v5e: 90

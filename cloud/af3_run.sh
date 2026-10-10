@@ -72,11 +72,47 @@
 # instead. Without a published price for the provisioning model (G2
 # Flex-start), it uses the on-demand price as the upper bound and says so.
 #
-# The VM is deleted in every case: by the EXIT trap (results first), and
-# independently by Google: --max-run-duration with
+# Connection loss (cloud/lib_detached.sh): a failed poll is classified with
+# the API. No network on this laptop (or the API unreachable): the launcher
+# waits with backoff until the deadline and touches nothing. The VM up but
+# SSH failing: it goes on following until the deadline and reads the job's
+# end from the results bucket if one is set. The VM preempted, stopped or
+# gone: it stops at once. One line is printed per change, not per retry.
+#
+# Deleting: the EXIT trap deletes the VM (results first) when the job has
+# finished (EXIT_CODE), at the follow deadline, on Ctrl-C, when the VM is
+# already gone or the job no longer runs, or before the job was started. A
+# VM the API reports running whose job has not finished is never deleted
+# otherwise: the launcher keeps it, says so, and prints the resume command.
+# If the API is unreachable when the VM may be deleted, it waits up to
+# CLEANUP_WAIT_MIN (30) minutes for it. Independently, Google deletes every
+# VM at the end of its lifetime: --max-run-duration with
 # --instance-termination-action=DELETE on every Compute Engine VM (Spot and
 # on-demand too), the systemd watchdog on the legacy TPU VM. The script never
 # adopts or deletes a VM it did not create, and lists leftovers at the end.
+#
+# Session records: results/af3/.launcher/<session>/ holds launch_record.txt
+# (VM, zone, plan, bucket, deadline; read by resume mode), uploaded_files.txt
+# (git blob hash of every file uploaded to the VM, with the commit and the
+# number of uncommitted files at launch) and launcher_events.txt (one line
+# per event: VM created, connection lost and back with durations, job
+# finished, deadline, every delete-or-keep decision). They are copied into
+# the fetched session and uploaded to the results bucket at the end. On the
+# VM, the job wrapper writes EXIT_CODE and final_status.json and copies both
+# to RESULTS_GCS_URI/af3/<session>/ (cloud/vm_job_finish.sh).
+#
+# Resume mode: re-attach to the VM of an earlier launch of this script (for
+# example after the laptop was closed or the launcher was killed), follow
+# it, fetch and delete it as usual:
+#   RESUME_VM=af3-run-v5e-20261009t154308z SESSION=20261009T154308Z_v5e_pilot bash cloud/af3_run.sh
+# The settings come from the session's launch_record.txt; RESUME_VM must be
+# the VM recorded there, and the VM's labels (purpose, platform, plan,
+# session) and its session folder must match, or nothing is touched. The
+# follow deadline is what was left of the original one (at least 1 minute);
+# DETACHED_DEADLINE_MIN overrides it. A session launched before launch
+# records existed is accepted only if RESUME_VM is the name that launcher
+# derived from the session (af3-run-<platform>-<stamp>), the labels match,
+# and ZONE is given; PLAN, RESULTS_GCS_URI and FETCH as at launch.
 # macOS bash 3.2: no arrays.
 set -euo pipefail
 
@@ -85,6 +121,46 @@ die() { echo "!! $*" >&2; exit 1; }
 # cloud/env.sh exports ZONE, TPU_NAME and other settings for the multi-chip AF2
 # sessions; inheriting them here would create the wrong VM.
 [ -z "${AF2_COMMIT:-}" ] || die "cloud/env.sh is sourced in this shell. Open a fresh shell; this script has its own defaults."
+
+# Resume mode (header): the settings come from the session's launch record.
+RESUME=0 RESUME_LEGACY=0 RESUME_NOTE=""
+if [ -n "${RESUME_VM:-}" ]; then
+  RESUME=1
+  [ -n "${SESSION:-}" ] || die "RESUME_VM needs SESSION=<session folder name, as under results/af3/>."
+  echo "$SESSION" | grep -Eq '^[0-9]{8}T[0-9]{6}Z_(cpu|l4|v5e|v6e)_[a-z0-9_-]+$' || die "Not a session name: SESSION='$SESSION'."
+  REC="$(git rev-parse --show-toplevel)/results/af3/.launcher/$SESSION/launch_record.txt"
+  rec() { sed -n "s/^$1=//p" "$REC" | tail -1; }
+  if [ -f "$REC" ]; then
+    [ "$(rec SESSION)" = "$SESSION" ] || die "$REC is not the record of $SESSION."
+    [ "$(rec VM_NAME)" = "$RESUME_VM" ] \
+      || die "$RESUME_VM is not in the records of $SESSION (its VM is $(rec VM_NAME)); nothing was touched."
+    [ "$(rec CREATED)" = "1" ] || die "The record of $SESSION shows no created VM; nothing to resume."
+    PLATFORM=$(rec PLATFORM) PLAN=$(rec PLAN) ZONE=$(rec ZONE) PROJECT=$(rec PROJECT)
+    MACHINE_TYPE=$(rec MACHINE_TYPE) PROVISIONING=$(rec PROVISIONING) WEIGHTS=$(rec WEIGHTS)
+    RESULTS_GCS_URI=$(rec RESULTS_GCS_URI) FETCH="${FETCH:-$(rec FETCH)}" LIBTPU_VERSION=$(rec LIBTPU_VERSION)
+    MAX_RUN_DURATION=$(rec MAX_RUN_DURATION)
+    if [ -z "${DETACHED_DEADLINE_MIN:-}" ]; then
+      UNTIL=$(rec FOLLOW_UNTIL)
+      [ -n "$UNTIL" ] || UNTIL=$(( $(date +%s) + $(rec DEADLINE_MIN) * 60 ))
+      DETACHED_DEADLINE_MIN=$(( (UNTIL - $(date +%s) + 59) / 60 ))
+      if [ "$DETACHED_DEADLINE_MIN" -lt 1 ]; then
+        DETACHED_DEADLINE_MIN=1
+        RESUME_NOTE="the original follow deadline has passed: following for 1 min (DETACHED_DEADLINE_MIN sets more)"
+      fi
+    fi
+  else
+    # Launched before launch records existed: only the VM that launcher named.
+    RESUME_LEGACY=1
+    PLATFORM=$(echo "$SESSION" | cut -d_ -f2)
+    LEGACY_PLAN_NAME=$(echo "$SESSION" | cut -d_ -f3-)
+    [ "$RESUME_VM" = "af3-run-$PLATFORM-$(echo "${SESSION%%_*}" | tr 'A-Z' 'a-z')" ] \
+      || die "$SESSION has no launch record, and $RESUME_VM is not the VM name its launcher derived; nothing was touched."
+    [ -n "${ZONE:-}" ] || die "$SESSION has no launch record: give ZONE=<the zone the launcher reported> as well."
+    PLAN="${PLAN:-harness/plans/$LEGACY_PLAN_NAME.yaml}"
+  fi
+  unset ZONES
+  VM_NAME=$RESUME_VM
+fi
 : "${PLATFORM:?set PLATFORM to cpu, l4, v5e or v6e}"
 command -v gcloud > /dev/null || die "gcloud not found."
 command -v python3 > /dev/null || die "python3 not found."
@@ -197,7 +273,8 @@ WEIGHTS="${WEIGHTS:-$PLAN_WEIGHTS}"
 case "$WEIGHTS" in
   random) [ -z "${WEIGHTS_GCS_URI:-}" ] || echo "   note: WEIGHTS=random, so WEIGHTS_GCS_URI is ignored" ;;
   gcs)
-    case "${WEIGHTS_GCS_URI:-}" in gs://?*/?*) ;; *) die "WEIGHTS=gcs needs WEIGHTS_GCS_URI=gs://BUCKET/OBJECT (a private bucket in $PROJECT)." ;; esac ;;
+    # Resume mode starts nothing, so it needs no weights URI.
+    [ "$RESUME" = "1" ] || case "${WEIGHTS_GCS_URI:-}" in gs://?*/?*) ;; *) die "WEIGHTS=gcs needs WEIGHTS_GCS_URI=gs://BUCKET/OBJECT (a private bucket in $PROJECT)." ;; esac ;;
   *) die "WEIGHTS must be random or gcs." ;;
 esac
 [ "$WEIGHTS" = "$PLAN_WEIGHTS" ] || echo "   note: the plan asks for weights=$PLAN_WEIGHTS; running with WEIGHTS=$WEIGHTS"
@@ -232,7 +309,7 @@ if [ -n "$RESULTS_GCS_URI" ]; then
   echo "$RESULTS_GCS_URI" | grep -Eq '^gs://[a-z0-9][a-z0-9._-]*[a-z0-9](/[A-Za-z0-9._-]+)*$' \
     || die "RESULTS_GCS_URI must be gs://BUCKET or gs://BUCKET/PREFIX (letters, digits, . _ - /)."
   RESULTS_BUCKET=$(echo "$RESULTS_GCS_URI" | cut -d/ -f3)
-  if [ "$WEIGHTS" = "gcs" ] && [ "$RESULTS_BUCKET" = "$(echo "$WEIGHTS_GCS_URI" | cut -d/ -f3)" ]; then
+  if [ "$WEIGHTS" = "gcs" ] && [ "$RESUME" != "1" ] && [ "$RESULTS_BUCKET" = "$(echo "$WEIGHTS_GCS_URI" | cut -d/ -f3)" ]; then
     die "RESULTS_GCS_URI must be a different bucket from the weights bucket."
   fi
   FETCH_EFFECTIVE=$FETCH
@@ -259,15 +336,19 @@ else
   WAIT_S=900
 fi
 
-# Frozen inputs must match the manifest before anything is created.
-echo ">> Checking the plan's frozen inputs against inputs/manifest.csv"
-python3 harness/verify_inputs.py --targets "$TARGETS" \
-  || die "Frozen inputs do not match inputs/manifest.csv; nothing was created."
-
-STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-SESSION="${STAMP}_${PLATFORM}_${PLAN_NAME}"
-[ ! -e "results/af3/$SESSION" ] || die "results/af3/$SESSION exists; sessions are never overwritten."
-VM_NAME="${VM_NAME:-af3-run-$PLATFORM-$(echo "$STAMP" | tr 'A-Z' 'a-z')}"
+if [ "$RESUME" != "1" ]; then
+  # Frozen inputs must match the manifest before anything is created.
+  echo ">> Checking the plan's frozen inputs against inputs/manifest.csv"
+  python3 harness/verify_inputs.py --targets "$TARGETS" \
+    || die "Frozen inputs do not match inputs/manifest.csv; nothing was created."
+  STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+  SESSION="${STAMP}_${PLATFORM}_${PLAN_NAME}"
+  [ ! -e "results/af3/$SESSION" ] || die "results/af3/$SESSION exists; sessions are never overwritten."
+  [ ! -e "results/af3/.launcher/$SESSION" ] || die "results/af3/.launcher/$SESSION exists; sessions are never overwritten."
+  VM_NAME="${VM_NAME:-af3-run-$PLATFORM-$(echo "$STAMP" | tr 'A-Z' 'a-z')}"
+fi
+LAUNCH_DIR="results/af3/.launcher/$SESSION"
+DETACHED_EVENTS="$LAUNCH_DIR/launcher_events.txt"
 OUT_REL="alphafold-on-tpu/results/af3/$SESSION"
 BENCH_COMMIT=$(git rev-parse HEAD)
 EXPIRES=$(( $(date +%s) + MAX_RUN_S + WAIT_S ))
@@ -380,6 +461,10 @@ else
   echo "   results bucket: none (RESULTS_GCS_URI not set); fetch: full over SSH (FETCH=light needs the bucket)"
 fi
 echo "   session: results/af3/$SESSION/   VM: $VM_NAME"
+if [ "$RESUME" = "1" ]; then
+  echo "   RESUME: re-attach to $VM_NAME in $ZONE (no VM is created, nothing is uploaded or started)$([ "$RESUME_LEGACY" = 1 ] && echo "; session without a launch record")"
+  [ -z "$RESUME_NOTE" ] || echo "   !! $RESUME_NOTE"
+fi
 if [ "${YES:-0}" != "1" ]; then
   printf 'Proceed? [y/N] '
   read -r ANSWER || ANSWER=""
@@ -388,42 +473,209 @@ fi
 
 # Never adopt (and later delete) a VM this run did not create. (Compute
 # Engine: checked again in every zone tried.)
-if vm_exists; then die "$VM_NAME already exists in $ZONE. Delete it or set VM_NAME."; fi
+if [ "$RESUME" != "1" ] && vm_exists; then die "$VM_NAME already exists in $ZONE. Delete it or set VM_NAME."; fi
+mkdir -p "$LAUNCH_DIR"
+CLEANUP_WAIT_MIN="${CLEANUP_WAIT_MIN:-30}"
 
-CREATE_ISSUED=0 STARTED=0 RUN_DONE=0
+# record KEY VALUE: appends to the session's launch record (the last value of
+# a key wins; resume mode reads it). Never holds the weights URI.
+record() { echo "$1=$2" >> "$LAUNCH_DIR/launch_record.txt"; }
+
+# The job's exit code from the results bucket (written there by
+# cloud/vm_job_finish.sh), or nothing; cloud/lib_detached.sh asks for it when
+# SSH fails while the VM is up.
+detached_exit_elsewhere() {
+  [ -n "$RESULTS_SESSION_URI" ] || return 0
+  gcloud storage cat "$RESULTS_SESSION_URI/EXIT_CODE" 2> /dev/null | head -1 | tr -d ' \r\n'
+}
+
+# delete_reason: why the VM may be deleted now (see the header), or nothing.
+delete_reason() {
+  local s
+  if [ "$STARTED" != "1" ]; then echo "the job was not started"; return 0; fi
+  if [ -n "$DETACHED_RC_VIA" ]; then echo "the job finished with exit code $DETACHED_RC"; return 0; fi
+  case "$DETACHED_END" in
+    deadline) echo "the follow deadline was reached"; return 0 ;;
+    vm_gone) echo "the VM is $DETACHED_VM_STATE"; return 0 ;;
+    job_gone) echo "the job no longer runs and left no EXIT_CODE"; return 0 ;;
+  esac
+  if [ "$INTERRUPTED" = "1" ]; then echo "interrupted (Ctrl-C or TERM)"; return 0; fi
+  s=$(vm_state)
+  if vm_state_is_gone "$s"; then echo "the VM is $s"; fi
+  return 0
+}
+
+# wait_for_api MAX_S: the VM's state as soon as the API answers (backoff),
+# UNKNOWN if it did not within MAX_S seconds.
+wait_for_api() {
+  local s w="$DETACHED_POLL_S" t0
+  t0=$(date +%s)
+  s=$(vm_state)
+  while [ "$s" = "UNKNOWN" ] && [ $(( $(date +%s) - t0 )) -lt "$1" ]; do
+    sleep "$w"
+    w=$(( w * 2 )); [ "$w" -le "$DETACHED_MAX_BACKOFF_S" ] || w=$DETACHED_MAX_BACKOFF_S
+    s=$(vm_state)
+  done
+  echo "$s"
+}
+
+# The launcher's records go into the fetched session and the results bucket.
+launcher_files_out() {
+  local f files=""
+  for f in launch_record.txt uploaded_files.txt launcher_events.txt; do
+    [ ! -f "$LAUNCH_DIR/$f" ] || files="$files $LAUNCH_DIR/$f"
+  done
+  [ -n "$files" ] || return 0
+  [ ! -d "results/af3/$SESSION" ] || cp $files "results/af3/$SESSION/"
+  if [ -n "$RESULTS_SESSION_URI" ]; then
+    if gcloud storage cp $files "$RESULTS_SESSION_URI/" > /dev/null 2>&1; then
+      echo ">> Launcher records uploaded to $RESULTS_SESSION_URI/"
+    else
+      echo "!! Could not upload the launcher records; they are in $LAUNCH_DIR/"
+    fi
+  fi
+}
+
+CREATE_ISSUED=0 STARTED=0 RUN_DONE=0 INTERRUPTED=0
 cleanup() {
-  local rc=$? op
+  local rc=$? op why vstate
   [ "$rc" -ne 0 ] || [ "$RUN_DONE" = "1" ] || rc=1
   trap - EXIT INT TERM
   set +e
   if [ "$CREATE_ISSUED" = "1" ]; then
+    why=$(delete_reason)
+    vstate=""
+    [ "$STARTED" != "1" ] && [ -n "$why" ] || vstate=$(vm_state)
+    if [ "$vstate" = "UNKNOWN" ] && [ -n "$why" ] && [ "$INTERRUPTED" != "1" ]; then
+      echo "!! The API cannot be reached from this laptop: waiting up to $CLEANUP_WAIT_MIN min for it, to fetch and delete"
+      detached_event "cleanup: API unreachable; waiting up to $CLEANUP_WAIT_MIN min"
+      vstate=$(wait_for_api $(( CLEANUP_WAIT_MIN * 60 )))
+      detached_event "cleanup: after waiting, VM state $vstate"
+    fi
     if [ "$STARTED" = "1" ]; then
-      results_fetch "$OUT_REL" results/af3 "$FETCH_EFFECTIVE" "$RESULTS_SESSION_URI"
-      if [ -n "$COMPARE_REF" ] && [ -d "$COMPARE_REF" ] && [ -d "results/af3/$SESSION" ]; then
-        echo ">> Comparing with $COMPARE_REF (results/af3/$SESSION/compare_runs.txt)"
-        python3 harness/compare_runs.py --session "results/af3/$SESSION" --reference "$COMPARE_REF" | sed 's/^/   /'
-        [ "$FETCH_EFFECTIVE" = "full" ] || echo "   (FETCH=light: the full confidences stayed in the bucket and show as missing)"
+      ! vm_state_is_gone "$vstate" || DETACHED_VM_GONE=1
+      if results_fetch "$OUT_REL" results/af3 "$FETCH_EFFECTIVE" "$RESULTS_SESSION_URI"; then
+        detached_event "fetch: done ($FETCH_EFFECTIVE)"
+        if [ -n "$COMPARE_REF" ] && [ -d "$COMPARE_REF" ] && [ -d "results/af3/$SESSION" ]; then
+          echo ">> Comparing with $COMPARE_REF (results/af3/$SESSION/compare_runs.txt)"
+          python3 harness/compare_runs.py --session "results/af3/$SESSION" --reference "$COMPARE_REF" | sed 's/^/   /'
+          [ "$FETCH_EFFECTIVE" = "full" ] || echo "   (FETCH=light: the full confidences stayed in the bucket and show as missing)"
+        fi
+      else
+        detached_event "fetch: failed (SSH and bucket)"
       fi
     fi
-    echo ">> Deleting $VM_NAME"
-    if ! vm_delete && [ "$VM_API" = "gce" ]; then
-      op=$(vm_insert_op status)
-      if [ "$op" = "PENDING" ] || [ "$op" = "RUNNING" ]; then
-        echo "!! The create request for $VM_NAME is still queued and could not be cancelled."
-        echo "!! If it is granted, Google deletes the VM after $MAX_RUN_DURATION. To delete it sooner:"
-        echo "!!   gcloud compute instances delete $VM_NAME --project=$PROJECT --zone=$ZONE --quiet"
+    if [ -n "$why" ]; then
+      echo ">> Deleting $VM_NAME ($why)"
+      detached_event "delete: requested ($why)"
+      if vm_delete; then
+        detached_event "delete: done"
+      else
+        op=$(vm_state)
+        if [ "$op" = "NOT_FOUND" ]; then detached_event "delete: the VM was already gone"; else detached_event "delete: failed (VM state $op)"; fi
+        if [ "$VM_API" = "gce" ]; then
+          op=$(vm_insert_op status)
+          if [ "$op" = "PENDING" ] || [ "$op" = "RUNNING" ]; then
+            echo "!! The create request for $VM_NAME is still queued and could not be cancelled."
+            echo "!! If it is granted, Google deletes the VM after $MAX_RUN_DURATION. To delete it sooner:"
+            echo "!!   gcloud compute instances delete $VM_NAME --project=$PROJECT --zone=$ZONE --quiet"
+          fi
+        fi
       fi
+    else
+      echo "!! $VM_NAME is NOT deleted: the API reports it $vstate and its job has not finished."
+      echo "!! It goes on running; Google deletes it at the end of its lifetime" \
+           "($([ "$VM_API" = tpu ] && echo "watchdog, $WATCHDOG_HOURS h" || echo "--max-run-duration=$MAX_RUN_DURATION") after creation)."
+      echo "!! To follow it again, fetch and delete it:"
+      echo "!!   RESUME_VM=$VM_NAME SESSION=$SESSION$([ "$RESUME_LEGACY" = 1 ] && echo " ZONE=$ZONE") bash cloud/af3_run.sh"
+      detached_event "kept: VM $vstate and job not finished; not deleted (resume: RESUME_VM=$VM_NAME SESSION=$SESSION)"
+      [ "$rc" -ne 0 ] || rc=1
     fi
   fi
   vm_leftovers
+  detached_event "launcher: exit code $rc"
+  launcher_files_out
   echo ">> exit code $rc"
   [ ! -d "results/af3/$SESSION" ] || echo ">> results: results/af3/$SESSION/"
   exit "$rc"
 }
 trap cleanup EXIT
-trap 'exit 130' INT TERM
+trap 'INTERRUPTED=1; exit 130' INT TERM
 
-LABELS="purpose=af3-run,platform=$PLATFORM,plan=$PLAN_NAME,owner=lorenzo,expires=$EXPIRES"
+# follow_job: follows the started job to its end (or the deadline).
+follow_job() {
+  record FOLLOW_UNTIL $(( $(date +%s) + DETACHED_DEADLINE_MIN * 60 ))
+  if ! detached_wait "$OUT_REL"; then
+    [ "$DETACHED_VM_GONE" != "1" ] || die "$VM_NAME was preempted or deleted during the run; cleaning up."
+    [ "$DETACHED_END" != "deadline" ] || die "Follow deadline reached; cleaning up (results first)."
+    die "No result from the job."
+  fi
+  if [ "$DETACHED_RC" != "0" ]; then
+    echo "!! The job exited with $DETACHED_RC (setup: 3 inputs, 4 weights, 5 device or TPU stack;" \
+         "plan: 1 some runs failed, all recorded, 5 a libtpu switch failed); results are fetched below"
+    exit "$DETACHED_RC"
+  fi
+  echo ">> Plan finished: every harness run exited 0"
+  RUN_DONE=1
+}
+
+# resume_attach: checks that VM_NAME is this session's VM (labels, session
+# folder); dies before anything is touched otherwise.
+label() { gcloud $VM_RES describe "$VM_NAME" $GC --format="value(labels.$1)" 2> /dev/null | tail -1; }
+resume_attach() {
+  local s want reply
+  s=$(vm_state)
+  case "$s" in
+    UNKNOWN) die "The API cannot be reached to check $VM_NAME; nothing was touched. Try again when the network is back." ;;
+    NOT_FOUND) die "$VM_NAME does not exist in $ZONE: nothing to follow.$([ -z "$RESULTS_SESSION_URI" ] || echo " What the job uploaded is in $RESULTS_SESSION_URI/.")" ;;
+  esac
+  [ "$RESUME_LEGACY" != "1" ] || [ "$PLAN_NAME" = "$LEGACY_PLAN_NAME" ] \
+    || die "PLAN $PLAN does not match the session's plan $LEGACY_PLAN_NAME; nothing was touched."
+  want=$(echo "$SESSION" | tr 'A-Z' 'a-z' | cut -c1-63)
+  [ "$(label purpose)" = "af3-run" ] && [ "$(label platform)" = "$PLATFORM" ] && [ "$(label plan)" = "$PLAN_NAME" ] \
+    && { [ "$RESUME_LEGACY" = "1" ] || [ "$(label session)" = "$want" ]; } \
+    || die "$VM_NAME does not carry this session's labels (purpose af3-run, platform $PLATFORM, plan $PLAN_NAME$([ "$RESUME_LEGACY" = 1 ] || echo ", session $want")); nothing was touched."
+  reply=$(vm_ssh "if [ -d \$HOME/$OUT_REL ]; then echo '@@ HAS'; else echo '@@ MISSING'; fi" 2> /dev/null | grep '^@@ ' | head -1 || true)
+  case "$reply" in
+    "@@ MISSING") die "$VM_NAME has no folder ~/$OUT_REL: not this session's VM; nothing was touched." ;;
+    "@@ HAS") ;;
+    *) echo "   (SSH not reachable now: the record and the labels match; following anyway)" ;;
+  esac
+  if [ "$RESUME_LEGACY" = "1" ]; then
+    record SESSION "$SESSION"; record VM_NAME "$VM_NAME"; record VM_API "$VM_API"; record PLATFORM "$PLATFORM"
+    record PROJECT "$PROJECT"; record ZONE "$ZONE"; record PLAN "$PLAN"; record MACHINE_TYPE "$MACHINE_TYPE"
+    record PROVISIONING "$PROVISIONING"; record WEIGHTS "$WEIGHTS"; record RESULTS_GCS_URI "$RESULTS_GCS_URI"
+    record FETCH "$FETCH"; record LIBTPU_VERSION "$LIBTPU_VERSION"; record DEADLINE_MIN "$DETACHED_DEADLINE_MIN"
+    record MAX_RUN_DURATION "$MAX_RUN_DURATION"; record CREATED 1; record LEGACY 1
+  fi
+  record RESUMED_UTC "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  detached_event "resume: re-attached to $VM_NAME (state $s)$([ "$RESUME_LEGACY" != 1 ] || echo ", session without a launch record"); deadline $DETACHED_DEADLINE_MIN min"
+  if vm_state_is_gone "$s"; then
+    CREATE_ISSUED=1 STARTED=1 DETACHED_VM_GONE=1 DETACHED_END=vm_gone DETACHED_VM_STATE=$s
+    die "$VM_NAME is $s: nothing to follow; fetching what the bucket has, then deleting it."
+  fi
+}
+
+if [ "$RESUME" = "1" ]; then
+  resume_attach
+  CREATE_ISSUED=1 STARTED=1
+  DETACHED_SCRIPT=cloud/vm_af3_job.sh
+  DETACHED_LOG=job.log
+  follow_job
+  exit 0
+fi
+
+# A new launch: the record first, so a launcher killed from here on can be resumed.
+BENCH_DIRTY=$(git status --porcelain -- af3_tpu harness targets inputs cloud | wc -l | tr -d ' ')
+record SESSION "$SESSION"; record VM_NAME "$VM_NAME"; record VM_API "$VM_API"; record PLATFORM "$PLATFORM"
+record PROJECT "$PROJECT"; record ZONE "$ZONE"; record PLAN "$PLAN"; record MACHINE_TYPE "$MACHINE_TYPE"
+record PROVISIONING "$PROVISIONING"; record WEIGHTS "$WEIGHTS"; record RESULTS_GCS_URI "$RESULTS_GCS_URI"
+record FETCH "$FETCH"; record LIBTPU_VERSION "$LIBTPU_VERSION"; record DEADLINE_MIN "$DETACHED_DEADLINE_MIN"
+record MAX_RUN_DURATION "$MAX_RUN_DURATION"; record COMMIT "$BENCH_COMMIT"; record DIRTY_FILES "$BENCH_DIRTY"
+record LAUNCHED_UTC "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+detached_event "launch: session $SESSION, VM $VM_NAME ($MACHINE_TYPE, $PROVISIONING), plan $PLAN, commit $BENCH_COMMIT, $BENCH_DIRTY uncommitted file(s) under af3_tpu harness targets inputs cloud"
+
+LABELS="purpose=af3-run,platform=$PLATFORM,plan=$PLAN_NAME,session=$(echo "$SESSION" | tr 'A-Z' 'a-z' | cut -c1-63),owner=lorenzo,expires=$EXPIRES"
 CREATE_ISSUED=1
 if [ "$VM_API" = "tpu" ]; then
   echo ">> Creating $VM_NAME ($MACHINE_TYPE, $RUNTIME) in $ZONE, $PROVISIONING"
@@ -488,13 +740,21 @@ else
   REGION="${ZONE%-*}"
   echo ">> $VM_NAME is running in $ZONE (zone attempt $ATTEMPT)"
 fi
+record CREATED 1; record ZONE "$ZONE"; record CREATED_UTC "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+detached_event "vm: $VM_NAME running in $ZONE"
 echo ">> Waiting for SSH"
 vm_wait_ssh || exit 1
 
 echo ">> Uploading the plan's files (commit $BENCH_COMMIT)"
 TGZ=$(mktemp -t af3-run.XXXXXX)
-FILES="af3_tpu harness targets inputs/manifest.csv cloud/vm_af3_setup.sh cloud/vm_af3_weights.sh cloud/vm_device_check.sh cloud/vm_tpu_stack.sh cloud/vm_af3_job.sh"
+FILES="af3_tpu harness targets inputs/manifest.csv cloud/vm_af3_setup.sh cloud/vm_af3_weights.sh cloud/vm_device_check.sh cloud/vm_tpu_stack.sh cloud/vm_af3_job.sh cloud/vm_job_finish.sh"
 for t in $(echo "$TARGETS" | tr ',' ' '); do FILES="$FILES data/inputs/$t.json"; done
+# Provenance: the git blob hash of every uploaded file (comparable with
+# `git ls-tree -r <commit>`), with the commit and the uncommitted-file count.
+{
+  echo "# commit $BENCH_COMMIT; uncommitted files under af3_tpu harness targets inputs cloud: $BENCH_DIRTY"
+  find $FILES -type f ! -path '*/__pycache__/*' | sort | while read -r f; do echo "$(git hash-object "$f")  $f"; done
+} > "$LAUNCH_DIR/uploaded_files.txt"
 tar czf "$TGZ" --exclude=__pycache__ $FILES
 vm_upload "$TGZ" af3_run.tgz
 rm -f "$TGZ"
@@ -515,14 +775,6 @@ STARTED=1
 detached_start "$OUT_REL" \
   "PLATFORM=$PLATFORM PLAN=$PLAN WEIGHTS=$WEIGHTS TARGETS=$TARGETS SESSION=$SESSION RESULTS_URI=$RESULTS_SESSION_URI LIBTPU_VERSION=$LIBTPU_VERSION" \
   || die "Could not start the job on the VM."
-if ! detached_wait "$OUT_REL"; then
-  [ "$DETACHED_VM_GONE" != "1" ] || die "$VM_NAME was preempted or deleted during the run; cleaning up."
-  die "No result from the job."
-fi
-if [ "$DETACHED_RC" != "0" ]; then
-  echo "!! The job exited with $DETACHED_RC (setup: 3 inputs, 4 weights, 5 device or TPU stack;" \
-       "plan: 1 some runs failed, all recorded, 5 a libtpu switch failed); results are fetched below"
-  exit "$DETACHED_RC"
-fi
-echo ">> Plan finished: every harness run exited 0"
-RUN_DONE=1
+record STARTED_UTC "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+detached_event "job: started on the VM"
+follow_job

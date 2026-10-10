@@ -4,7 +4,13 @@
 #   drop       polls 2-4 fail, then recover            lost       every poll from the 2nd fails
 #   preempt    from poll FAKE_PREEMPT_POLL (2): SSH fails, describe says PREEMPTED (tpu) or TERMINATED (gce)
 #   preempt_gone  likewise, describe says NOT_FOUND
-#   fetchfail  every download (scp from the VM) fails   uploadfail  storage rsync to gs:// fails
+#   fetchfail  every download (scp from the VM) fails   uploadfail  storage rsync/cp to gs:// fails
+# Network loss on the laptop: FAKE_NET_DOWN="POLL:SECONDS" makes every gcloud
+#   call made from the laptop (not from the fake VM, whose HOME is $FAKE_HOME)
+#   fail like gcloud without network for SECONDS seconds, from the launcher's
+#   POLL-th status poll on; refused calls go to $FAKE_DIR/net_refused.
+#   FAKE_NET_GONE=1: Google deletes the VM during the loss (its job stops).
+# describe --format="value(labels.KEY)" answers from the create call's --labels.
 # A fake bucket lives in $FAKE_DIR/bucket (gs://B/P -> $FAKE_DIR/bucket/B/P).
 # Zones (Compute Engine): FAKE_ZONES="zone:behaviour ..." (unlisted zones: ok)
 #   sync      create fails at once with a STOCKOUT message
@@ -31,6 +37,52 @@ for a in "$@"; do
 done
 behaviour() { local zb; for zb in ${FAKE_ZONES:-}; do [ "${zb%%:*}" = "$1" ] && { echo "${zb#*:}"; return; }; done; echo ok; }
 B=$(behaviour "$Z")
+if [ -n "${FAKE_NET_DOWN:-}" ] && [ "$HOME" != "$FAKE_HOME" ]; then
+  now=$(date +%s)
+  if [ ! -f "$FAKE_DIR/net_until" ]; then
+    case "$cmd" in
+      *"@@ RUNNING"*)
+        if [ "$(counter netpolls)" -ge "${FAKE_NET_DOWN%%:*}" ]; then
+          echo $(( now + ${FAKE_NET_DOWN#*:} )) > "$FAKE_DIR/net_until"
+          echo "$(date -u +%H:%M:%S) network down for ${FAKE_NET_DOWN#*:} s" >> "$FAKE_DIR/net_refused"
+        fi ;;
+    esac
+  fi
+  if [ -f "$FAKE_DIR/net_until" ] && [ "$now" -lt "$(cat "$FAKE_DIR/net_until")" ]; then
+    echo "$(date -u +%H:%M:%S) refused: gcloud $*" | cut -c1-160 >> "$FAKE_DIR/net_refused"
+    if [ "${FAKE_NET_GONE:-0}" = 1 ] && [ -f "$FAKE_DIR/created" ]; then
+      rm -f "$FAKE_DIR/created"; touch "$FAKE_DIR/deleted_by_google"
+      pkill -f "$FAKE_HOME/" 2> /dev/null
+    fi
+    echo "ERROR: gcloud crashed (TransportError): HTTPSConnectionPool(host='compute.googleapis.com', port=443): Max retries exceeded with url: / (Caused by NameResolutionError: Failed to resolve 'compute.googleapis.com')" >&2
+    case " $* " in *" ssh "* | *" scp "*) exit 255 ;; esac
+    exit 1
+  fi
+fi
+if [ "$1 $2" = "storage cat" ]; then          # the launcher reads EXIT_CODE from the bucket
+  f="$FAKE_DIR/bucket/${3#gs://}"
+  if [ -f "$f" ]; then cat "$f"; exit 0; fi
+  echo "ERROR: (gcloud.storage.cat) The following URLs matched no objects or files: $3" >&2
+  exit 1
+fi
+last=""
+for a in "$@"; do last=$a; done
+if [ "$1 $2" = "storage cp" ] && [ "${last#gs://}" != "$last" ]; then   # uploads: VM status files, launcher records
+  if [ "$FAKE_SCENARIO" = uploadfail ]; then
+    echo "ERROR: (gcloud.storage.cp) HTTPError 403: no storage.objects.create permission" >&2; exit 1
+  fi
+  dest="$FAKE_DIR/bucket/${last#gs://}"
+  shift 2
+  while [ $# -gt 1 ]; do
+    case "$1" in
+      --*) ;;
+      *) if [ "${dest%/}" != "$dest" ]; then mkdir -p "$dest"; cp "$1" "$dest"; else mkdir -p "$(dirname "$dest")"; cp "$1" "$dest"; fi ;;
+    esac
+    shift
+  done
+  echo "   fake storage cp -> $last" >> "$FAKE_LOG"
+  exit 0
+fi
 if [ "$1 $2" = "storage cp" ]; then          # on the VM: weights from the bucket
   echo "Copying $3 to file://$4" >&2
   head -c 4096 /dev/urandom > "$4/$(basename "$3")"
@@ -94,6 +146,12 @@ case "$verb" in
       if [ "$FAKE_SCENARIO" = preempt_gone ]; then echo "ERROR: (gcloud) NOT_FOUND: Resource not found" >&2; exit 1; fi
       [ "$group" = tpu ] && echo PREEMPTED || echo TERMINATED; exit 0
     fi
+    case "$FMT" in
+      "value(labels."*)
+        key=${FMT#value(labels.}; key=${key%)}
+        tr ' ' '\n' < "$FAKE_DIR/create_args" | sed -n 's/^--labels=//p' | tr ',' '\n' | sed -n "s/^$key=//p"
+        exit 0 ;;
+    esac
     [ "$group" = tpu ] && echo READY || echo RUNNING ;;
   create)
     [ -n "$Z" ] && echo "$Z" >> "$FAKE_DIR/zones_tried"
@@ -111,7 +169,7 @@ case "$verb" in
   oplist)
     case "$FMT" in json) echo '[{"status": "DONE"}]' ;; "value(status)") echo DONE ;; *) true ;; esac ;;
   ssh)
-    if gone_now; then echo "ssh: connect to host: Connection refused" >&2; exit 255; fi
+    if gone_now || [ ! -f "$FAKE_DIR/created" ]; then echo "ssh: connect to host: Connection refused" >&2; exit 255; fi
     case "$cmd" in
       *"@@ RUNNING"*)
         n=$(counter polls)

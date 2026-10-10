@@ -1,4 +1,4 @@
-"""M2 to M5 contrasts and statistics of notes/analysis_plan.md, sections 4 to 6.
+"""M2 to M5 contrasts and statistics of notes/analysis_plan.md, sections 4 to 6 and 11.
 
     analysis/.venv/bin/python analysis/contrasts.py --samples results/analysis/<name>/samples.csv \\
         [--out results/analysis/<name>/contrasts] [--labels pilot] [--include REGEX] [--exclude REGEX] \\
@@ -9,7 +9,10 @@ Input: the table of analysis/collect.py. Only runs at AlphaFold3's defaults
 the platform code (V5, V6, G, GT, C), or platform and libtpu version with
 --condition platform_libtpu. Two rows for the same (condition, target, seed,
 repetition, sample) from different sessions are an error, never resolved
-silently: select sessions with --labels, --include or --exclude.
+silently: select sessions with --labels, --include or --exclude. The
+precision-matched arms of plan section 11 (V6h, Gh: analysis/collect.py) are
+conditions of their own; they enter only the section 11 contrasts below,
+never RC, W, SD, HW, DU or Q3.
 
 Per (condition, repetition, target, seed):
   M2 top-1: the sample with the highest ranking_score (ties: lowest sample
@@ -27,6 +30,10 @@ Contrasts (plan section 5), paired on (target, seed) and (target, seed, sample):
            with --condition platform_libtpu; not a plan contrast, used for the
            stack validation);
   W(P)     r1 against the warm rerun w (pilot check 2: expected bit-identical).
+Section 11 contrasts (secondary), paired and computed in the same way:
+  PR(P)    r1 on P against r1 on Ph, P in {V6, G}: the default matmul precision;
+  HWh(V6,G) r1 on V6h against r1 on Gh, and HWh(G,C) r1 on Gh against r1 on C:
+           the platform difference with float32 matmuls matched.
 Statistics per contrast: flip rate of top-1, flip rate of top-1 success,
 flips that matter (top-1 changes and the two chosen structures differ in
 success), median and 90th percentile of M4 (ligand RMSD after pocket
@@ -36,7 +43,9 @@ of sample pairs with bit-identical coordinates.
 Uncertainty: 95% percentile intervals from a paired bootstrap over targets
 (resample targets with replacement, --replicates 10000, --seed 2026), and
 for each hardware pair HW(P,Q) - RC(P) of each flip rate on the same
-resampled targets (also HW - RC(Q), labelled secondary).
+resampled targets (also HW - RC(Q), labelled secondary). For HWh(P,Q) the
+same, against RC(P) and RC(Q) of the default-precision arms (the arms with
+"h" run r1 only), for section 11's reading rule.
 Q3: for n = 1..N seeds, the overall top-1 over the first n seeds, its success
 rate per condition (on its own targets) and the pairwise differences on each
 pair's common targets, with bootstrap intervals; the answer is the smallest n
@@ -65,15 +74,42 @@ sys.path.insert(0, str(REPO / 'harness'))
 
 PRIMARY = [('V6', 'G'), ('V5', 'V6'), ('G', 'C')]
 ORDER = ['V5', 'V6', 'G', 'GT', 'C']
+# Section 11: (kind, condition A, condition B), A the first-named side (M4 reference).
+PRECISION_CONTRASTS = [('PR', 'V6', 'V6h'), ('PR', 'G', 'Gh'), ('HWh', 'V6h', 'Gh'), ('HWh', 'Gh', 'C')]
+FLIP_STATS = ['flip_top1', 'flip_success', 'flip_matters']
+SAMPLE_STATS = ['m4_ligand_rmsd', 'm4_ca_rmsd_global', 'm5_ranking_score', 'm5_mean_plddt', 'm5_iptm']
+SANITY_THRESHOLD = 0.5
+Q3_BAND = 0.02
 
 
 def rank(condition):
   base = condition.split('_')[0]
   return (ORDER.index(base) if base in ORDER else len(ORDER), condition)
-FLIP_STATS = ['flip_top1', 'flip_success', 'flip_matters']
-SAMPLE_STATS = ['m4_ligand_rmsd', 'm4_ca_rmsd_global', 'm5_ranking_score', 'm5_mean_plddt', 'm5_iptm']
-SANITY_THRESHOLD = 0.5
-Q3_BAND = 0.02
+
+
+def arm(condition):
+  """The condition's code without the libtpu suffix of --condition platform_libtpu: V6h_0.0.43.2 -> V6h."""
+  return condition.split('_')[0]
+
+
+def precision_base(condition):
+  """For a condition with a non-default matmul precision (V6h, Gh, V6[float32]), its section 3 code; else None."""
+  a = arm(condition)
+  if '[' in a:
+    return a.split('[')[0]
+  if a.endswith('h') and a[:-1] in ORDER:
+    return a[:-1]
+  return None
+
+
+def default_precision(condition):
+  return precision_base(condition) is None
+
+
+def unh(condition):
+  """V6h -> V6, Gh_none -> G_none; other conditions unchanged."""
+  base = precision_base(condition)
+  return condition if base is None else base + condition[len(arm(condition)):]
 
 
 @functools.lru_cache(maxsize=None)
@@ -153,8 +189,9 @@ def pair_rows(name, kind, a_key, b_key, units, primary, contrast_pairs, seed_row
 
 def build_pairs(ok):
   units = seed_units(ok)
-  conds = sorted(ok.condition.unique())
-  reps = {c: sorted(ok[ok.condition == c].repetition.unique()) for c in conds}
+  all_conds = sorted(ok.condition.unique())
+  conds = [c for c in all_conds if default_precision(c)]
+  reps = {c: sorted(ok[ok.condition == c].repetition.unique()) for c in all_conds}
   seed_rows, sample_rows, contrasts, excluded = [], [], {}, []
 
   def keys(c, rep):
@@ -195,6 +232,16 @@ def build_pairs(ok):
       else:
         name, kind = f'HW({a},{b})', 'HW'
       add(name, kind, keys(a, 'r1'), keys(b, 'r1'), primary or kind == 'DU')
+  # Section 11, secondary: the precision-matched arms enter only these.
+  for kind, code_a, code_b in PRECISION_CONTRASTS:
+    for a in all_conds:
+      for b in all_conds:
+        if arm(a) != code_a or arm(b) != code_b or 'r1' not in reps[a] or 'r1' not in reps[b]:
+          continue
+        if kind == 'PR' and unh(b) != a:   # same platform (and libtpu, with --condition platform_libtpu)
+          continue
+        name = f'PR({a})' if kind == 'PR' else f'HWh({unh(a)},{unh(b)})'
+        add(name, kind, keys(a, 'r1'), keys(b, 'r1'), False)
   return pd.DataFrame(seed_rows), pd.DataFrame(sample_rows), contrasts, pd.DataFrame(excluded)
 
 
@@ -261,9 +308,10 @@ def summarize(seed_pairs, sample_pairs, contrasts, args):
 def hw_minus_rc(seed_pairs, contrasts, args):
   rows = []
   for name, (kind, primary) in contrasts.items():
-    if kind != 'HW':
+    if kind not in ('HW', 'HWh'):
       continue
-    p, q = re.match(r'HW\((.+),(.+)\)', name).groups()
+    # HWh(P,Q) names the default-precision codes, so RC(P) and RC(Q) are those of the default arms.
+    p, q = re.match(r'HWh?\((.+),(.+)\)', name).groups()
     for which, rc_platform in (('RC(P)', p), ('RC(Q), secondary', q)):
       rc = f'RC({rc_platform})'
       if rc not in contrasts:
@@ -288,7 +336,7 @@ def hw_minus_rc(seed_pairs, contrasts, args):
 
 
 def q3(ok, args):
-  r1 = ok[ok.repetition == 'r1']
+  r1 = ok[(ok.repetition == 'r1') & ok.condition.map(default_precision)]
   conds = sorted(r1.condition.unique(), key=rank)
   seeds = sorted(r1.seed.unique())
   rows, answer = [], None
@@ -342,7 +390,7 @@ def checks(d, ok, sample_pairs, args):
     if len(w):
       rows.append({'check': '2 warm rerun bit-identical to r1', 'condition': c,
                    'value': f'{int(w.bit_identical.sum())}/{len(w)} samples', 'detail': 'pass' if w.bit_identical.all() else 'FAIL'})
-  v6 = [c for c in ok.condition.unique() if c.startswith('V6')]
+  v6 = [c for c in ok.condition.unique() if arm(c) == 'V6']
   for c in v6:
     r1 = ok[(ok.condition == c) & (ok.repetition == 'r1')]
     best = r1.sort_values('ranking_score', ascending=False, kind='mergesort').groupby('target').head(1)
@@ -369,7 +417,8 @@ def report(summary, hwrc, q3rows, q3answer, chk, excluded, args, out):
            f'Source: `{pathlib.Path(args.samples).name}`; filters: labels={args.labels or "all"}, '
            f'include={args.include or "-"}, exclude={args.exclude or "-"}; condition={args.condition}; '
            f'bootstrap: {args.replicates} replicates over targets, seed {args.seed}. '
-           'Definitions: analysis/contrasts.py and notes/analysis_plan.md sections 4 and 5.', '',
+           'Definitions: analysis/contrasts.py and notes/analysis_plan.md sections 4, 5 and 11 '
+           '(PR and HWh: section 11, secondary).', '',
            '## Pilot checks (section 6)', '', '| check | condition | value | detail |', '|---|---|---|---|']
   lines += [f'| {r.check} | {r.condition} | {r.value} | {r.detail} |' for r in chk.itertuples()]
   lines += ['', '## Flip rates', '', '| contrast | primary | statistic | n pairs | targets | estimate | 95% CI |',
